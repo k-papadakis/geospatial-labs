@@ -1,0 +1,20 @@
+# # url = 'http://services.opendatagortynia.gr/geoserver/gwc/service/wmts?'
+# url = 'http://geodata.gov.gr:80/geoserver/wfs'
+# params = dict(service='WFS', version='2.0.0', request='DescribeFeatureType', outputFormat='json')
+
+# r = requests.get(url, params=params)
+# root = ET.fromstring(r.text)
+# tree = ET.ElementTree(root)
+# tree.write('hey.xml')
+
+# url = 'http://geo.stat.fi/geoserver/tilastointialueet/wfs'
+
+# # Specify parameters (read data in json format). 
+# params = dict(service='WFS', version='2.0.0', request='GetFeature', 
+#          typeName='tilastointialueet:kunta4500k', outputFormat='json')
+
+# # Fetch data from WFS using requests
+# r = requests.get(url, params=params)
+
+# # Create GeoDataFrame from geojson and set coordinate reference system
+# data = gpd.GeoDataFrame.from_features(geojson.loads(r.content),  crs="EPSG:3067")
