@@ -1,9 +1,11 @@
 # %%
+from cProfile import label
 from pathlib import Path
 
 import numpy as np
 import matplotlib.pyplot as plt
 import rasterio
+from rasterio.windows import Window
 
 from sklearn.model_selection import train_test_split
 from sklearn.svm import SVC
@@ -14,7 +16,7 @@ from sklearn.metrics import classification_report
 import torch
 from torch import nn
 import torch.nn.functional as F
-from torch.utils.data import Dataset, DataLoader, TensorDataset 
+from torch.utils.data import Dataset, DataLoader, TensorDataset, ConcatDataset
 import pytorch_lightning as pl
 from pytorch_lightning.callbacks.early_stopping import EarlyStopping
 
@@ -89,6 +91,8 @@ x_train, x_test, y_train, y_test = train_test_split(
     *read_flattened_pixels(train_x_paths, train_y_paths),
     test_size=0.2
 )
+
+# TODO: X ARE INT. FIX THIS.
 
 # %% Train SVM and RF
 
@@ -184,4 +188,53 @@ def train_mlp(x_train, y_train, x_test, y_test):
     return mlp
     
 
-# %%
+# %% STEP 3 - TRAIN PATCH WISE
+
+class PatchDataset(Dataset):
+    
+    def __init__(self, image_path, labels_path, patch_size=7):
+        super().__init__()
+        
+        self.image_path = image_path
+        self.labels_path = labels_path
+        self.patch_size = patch_size
+        
+        with rasterio.open(image_path) as src:
+            self.height = src.height
+            self.width = src.width
+            
+        with rasterio.open(labels_path) as src:
+            labels = src.read(1)
+        r = patch_size // 2
+        
+        is_inner = np.full_like(labels, False, bool)
+        is_inner[r:-r, r:-r] = True
+        
+        self.indices = np.nonzero((labels != 0) & is_inner)  # (i_array, j_array)
+        
+        self.labels = labels[self.indices]
+            
+    def __len__(self):
+        return len(self.labels)
+    
+    def __getitem__(self, idx):
+        i, j = self.indices[0][idx], self.indices[1][idx]
+        r = self.patch_size // 2
+        window = Window.from_slices((i-r, i+r+1), (j-r, j+r+1))
+        with rasterio.open(self.image_path) as src:
+            x = src.read(window=window)
+        
+        y = self.labels[idx]
+        
+        x = torch.tensor(x, dtype=torch.float32)  # TODO: THIS IS INT. FIX IT
+        y = torch.tensor(y, dtype=torch.int64)
+        return x, y
+    
+
+dataset = ConcatDataset(
+    [PatchDataset(image_path, labels_path) for image_path, labels_path in zip(train_x_paths, train_y_paths)]
+)
+
+dataloader = DataLoader(dataset, batch_size=64, num_workers=16)
+
+x, y = next(iter(dataloader))
