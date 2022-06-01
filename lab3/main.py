@@ -1,6 +1,5 @@
 # %%
 from pathlib import Path
-import itertools
 
 import numpy as np
 import matplotlib.pyplot as plt
@@ -17,6 +16,7 @@ from torch import nn
 import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader, TensorDataset 
 import pytorch_lightning as pl
+from pytorch_lightning.callbacks.early_stopping import EarlyStopping
 
 # %%
 train_x_paths = [
@@ -56,8 +56,8 @@ def plot_rgb(*paths, rgb=(23, 11, 7)):
     return fig, axs
 
 
-plot_rgb(*train_x_paths, *validation_x_paths) 
-plt.show()
+# plot_rgb(*train_x_paths, *validation_x_paths) 
+# plt.show()
 
 # %% STEP 2 - TRAIN PIXEL-WISE
 
@@ -80,6 +80,7 @@ def read_flattened_pixels(x_paths, y_paths):
 
     x = np.concatenate(x_lst, axis=1).T
     y = np.concatenate(y_lst, axis=0)
+    y = y - 1  # remap labels 1..14 --> 0..13
 
     return x, y
 
@@ -110,6 +111,8 @@ def train_traditional(x_train, y_train, x_test, y_test):
         print(type(model).__name__)
         print(classification_report(y_test, y_pred))
         print()
+        
+    return models
 
 
 # %% Train an MLP
@@ -119,14 +122,12 @@ class LitMLP(pl.LightningModule):
     def __init__(self, dim_in, dim_out):
         super().__init__()
         self.linear1 = nn.Linear(dim_in, 128)
-        self.linear2 = nn.Linear(128, 64)
-        self.linear3 = nn.Linear(64, dim_out)
-        self.dropout1 = nn.Dropout(p=0.1)
-        self.dropout2 = nn.Dropout(p=0.1)
-    
-    def training_step(self, batch,  batch_idx):
-        x, y = batch
+        self.linear2 = nn.Linear(128, 128)
+        self.linear3 = nn.Linear(128, dim_out)
+        self.dropout1 = nn.Dropout(p=0.2)
+        self.dropout2 = nn.Dropout(p=0.2)
         
+    def forward(self, x):
         x = self.linear1(x)
         x = self.dropout1(x)
         x = F.relu(x)
@@ -137,38 +138,50 @@ class LitMLP(pl.LightningModule):
         
         x = self.linear3(x)
         
-        loss = F.cross_entropy(x, y)
+        return x
+    
+    def predict_step(self, batch, batch_idx):
+        x, y = batch
+        logits = self(x)
+        pred = torch.argmax(logits, -1)
+        return pred 
+    
+    def training_step(self, batch,  batch_idx):
+        x, y = batch
+        loss = F.cross_entropy(self(x), y)
         self.log("train_loss", loss)
         return loss
     
     def validation_step(self, batch,  batch_idx):
         x, y = batch
-        
-        x = self.linear1(x)
-        x = self.dropout1(x)
-        x = F.relu(x)
-        
-        x = self.linear2(x)
-        x = self.dropout2(x)
-        x = F.relu(x)
-        
-        x = self.linear3(x)
-        
-        loss = F.cross_entropy(x, y)
+        loss = F.cross_entropy(self(x), y)
         self.log("val_loss", loss)
 
     def configure_optimizers(self):
-        optimizer = torch.optim.Adam(self.parameters(), lr=1e-3, weight_decay=1e-4)
+        optimizer = torch.optim.Adam(self.parameters(), lr=1e-4, weight_decay=1e-5)
         return optimizer
 
 
-train_dataset = TensorDataset(torch.Tensor(x_train), torch.LongTensor(y_train - 1))
-train_loader = DataLoader(train_dataset, batch_size=32)
-test_dataset = TensorDataset(torch.Tensor(x_test), torch.LongTensor(y_test - 1))
-test_loader = DataLoader(test_dataset, batch_size=32)
+def train_mlp(x_train, y_train, x_test, y_test):
+    train_dataset = TensorDataset(torch.Tensor(x_train), torch.LongTensor(y_train))
+    train_loader = DataLoader(train_dataset, batch_size=64, num_workers=16)
+    test_dataset = TensorDataset(torch.Tensor(x_test), torch.LongTensor(y_test))
+    test_loader = DataLoader(test_dataset, batch_size=64, num_workers=16)
+    
+    dim_in = x_train.shape[-1]
+    dim_out = len(np.unique(y_train))
+    mlp = LitMLP(dim_in, dim_out)
+    
+    callbacks = [
+        # EarlyStopping(monitor="val_loss", mode="min", patience=3, min_delta=1e-2),
+    ]
+    trainer = pl.Trainer(max_epochs=10, accelerator="gpu", callbacks=callbacks)
+    trainer.fit(mlp, train_loader, test_loader)
 
-mlp = LitMLP(dim_in=176, dim_out=14)
-trainer = pl.Trainer(max_epochs=5, accelerator="gpu")
-trainer.fit(mlp, train_loader, test_loader)
+    y_pred = torch.cat(trainer.predict(mlp, test_loader), 0)
+    print(classification_report(y_test, y_pred))
+    
+    return mlp
+    
 
 # %%
