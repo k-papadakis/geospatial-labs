@@ -1,5 +1,4 @@
 # %%
-from cProfile import label
 from pathlib import Path
 
 import numpy as np
@@ -12,6 +11,8 @@ from sklearn.svm import SVC
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.neural_network import MLPClassifier
 from sklearn.metrics import classification_report
+from sklearn.pipeline import Pipeline, make_pipeline
+from sklearn.preprocessing import StandardScaler
 
 import torch
 from torch import nn
@@ -81,8 +82,12 @@ def read_flattened_pixels(x_paths, y_paths):
         y_lst.append(y)
 
     x = np.concatenate(x_lst, axis=1).T
+    # Map all values in [0, 1]
+    max_val = np.iinfo(x.dtype).max
+    x = x / max_val
     y = np.concatenate(y_lst, axis=0)
-    y = y - 1  # remap labels 1..14 --> 0..13
+    # Remap labels 1..14 --> 0..13
+    y = y - 1
 
     return x, y
 
@@ -92,19 +97,12 @@ x_train, x_test, y_train, y_test = train_test_split(
     test_size=0.2
 )
 
-# TODO: X ARE INT. FIX THIS.
-
 # %% Train SVM and RF
 
 def train_traditional(x_train, y_train, x_test, y_test):
     models = [
-        SVC(C=1.0, kernel='rbf'),
+        make_pipeline(StandardScaler(), SVC(C=1.0, kernel='rbf')),
         RandomForestClassifier(n_estimators=10),
-        MLPClassifier(
-            hidden_layer_sizes=(32, 64),
-            learning_rate_init=0.001,
-            alpha=0.0001
-        )
     ]
 
     for model in models:
@@ -200,19 +198,24 @@ class PatchDataset(Dataset):
         self.patch_size = patch_size
         
         with rasterio.open(image_path) as src:
-            self.height = src.height
-            self.width = src.width
+            image = src.read()
+        
+        # Map all values in [0, 1]
+        max_val = np.iinfo(image.dtype).max
+        self.image = image / max_val
             
         with rasterio.open(labels_path) as src:
             labels = src.read(1)
-        r = patch_size // 2
         
+        # Keep only the pixels that are labelled and whose patch lies inside the image 
+        r = patch_size // 2
         is_inner = np.full_like(labels, False, bool)
         is_inner[r:-r, r:-r] = True
+        self.indices = np.nonzero((labels != 0) & is_inner)
         
-        self.indices = np.nonzero((labels != 0) & is_inner)  # (i_array, j_array)
-        
-        self.labels = labels[self.indices]
+        self.labels = labels[self.indices] - 1
+        # Remap labels 1..14 --> 0..13
+        self.labels -= 1
             
     def __len__(self):
         return len(self.labels)
@@ -220,21 +223,32 @@ class PatchDataset(Dataset):
     def __getitem__(self, idx):
         i, j = self.indices[0][idx], self.indices[1][idx]
         r = self.patch_size // 2
-        window = Window.from_slices((i-r, i+r+1), (j-r, j+r+1))
-        with rasterio.open(self.image_path) as src:
-            x = src.read(window=window)
-        
+        x = self.image[:, i-r : i+r+1, j-r : j+r+1]
         y = self.labels[idx]
         
-        x = torch.tensor(x, dtype=torch.float32)  # TODO: THIS IS INT. FIX IT
+        x = torch.tensor(x, dtype=torch.float32)
         y = torch.tensor(y, dtype=torch.int64)
         return x, y
     
 
+def display_patch(dataset, idx, ax=None, rgb=(23, 11, 7)):
+    if ax is None:
+        fig, ax = plt.subplots()
+    patch, label = dataset[idx]
+    img = patch[rgb, ...]
+    img = img / img.max()
+    img = torch.permute(img, (1, 2, 0))
+    ax.imshow(img)
+    return ax
+
+
 dataset = ConcatDataset(
-    [PatchDataset(image_path, labels_path) for image_path, labels_path in zip(train_x_paths, train_y_paths)]
+    [PatchDataset(image_path, labels_path)
+     for image_path, labels_path in zip(train_x_paths, train_y_paths)]
 )
 
-dataloader = DataLoader(dataset, batch_size=64, num_workers=16)
+# dataloader = DataLoader(dataset, batch_size=64, num_workers=16)
+# x, y = next(iter(dataloader))
+# display_patch(dataset, 200)
+# %% 
 
-x, y = next(iter(dataloader))
