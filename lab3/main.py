@@ -1,4 +1,5 @@
 # %%
+from typing import Optional, Union, Tuple
 from pathlib import Path
 from matplotlib import transforms
 
@@ -164,7 +165,7 @@ class LitMLP(pl.LightningModule):
 
 def train_mlp(x_train, y_train, x_test, y_test):
     train_dataset = TensorDataset(torch.Tensor(x_train), torch.LongTensor(y_train))
-    train_loader = DataLoader(train_dataset, batch_size=64, num_workers=16)
+    train_loader = DataLoader(train_dataset, batch_size=64, shuffle=True, num_workers=16)
     test_dataset = TensorDataset(torch.Tensor(x_test), torch.LongTensor(y_test))
     test_loader = DataLoader(test_dataset, batch_size=64, num_workers=16)
     
@@ -191,8 +192,6 @@ class PatchDataset(Dataset):
     def __init__(self, image_path, labels_path, patch_size, channels=None, transform=None):
         super().__init__()
         
-        self.image_path = image_path
-        self.labels_path = labels_path
         self.patch_size = patch_size
         self.transform = transform
         
@@ -295,12 +294,11 @@ dataset_train_aug = AugmentedDataset(dataset_train, transform)
 #     ax.set_axis_off()
 
 
-loader_train = DataLoader(dataset_train, batch_size=64, num_workers=8)
-loader_train_aug = DataLoader(dataset_train_aug, batch_size=64, num_workers=8)
+loader_train = DataLoader(dataset_train, batch_size=64, shuffle=True, num_workers=8)
+loader_train_aug = DataLoader(dataset_train_aug, batch_size=64, shuffle=True, num_workers=8)
 loader_val = DataLoader(dataset_val, batch_size=64, num_workers=8)
 loader_test = DataLoader(dataset_test, batch_size=64, num_workers=8)
 
-# TODO: ADD TRANSFORMS
 
 # %% 
 class LitCNN(pl.LightningModule):
@@ -431,9 +429,71 @@ rgb_dataset_train, rgb_dataset_val, rgb_dataset_test = split_dataset(
 )
 rgb_dataset_train_aug = AugmentedDataset(rgb_dataset_train, transform)
 
-rgb_loader_train = DataLoader(rgb_dataset_train, batch_size=64, num_workers=8)
-rgb_loader_train_aug = DataLoader(rgb_dataset_train_aug, batch_size=64, num_workers=8)
+rgb_loader_train = DataLoader(rgb_dataset_train, batch_size=64, shuffle=True, num_workers=8)
+rgb_loader_train_aug = DataLoader(rgb_dataset_train_aug, batch_size=64, shuffle=True, num_workers=8)
 rgb_loader_val = DataLoader(rgb_dataset_val, batch_size=64, num_workers=8)
 rgb_loader_test = DataLoader(rgb_dataset_test, batch_size=64, num_workers=8)
 
+
+# %%
+
+class CroppedDataset(Dataset):
+    
+    def __init__(self, image_path, labels_path,
+                 crop_size: Union[int, Tuple[int, int]],
+                 channels: Optional[Tuple[int, ...]] = None,
+                 transform=None,
+    ):
+        super().__init__()
+        
+        if isinstance(crop_size, int):
+            self.crop_h, self.crop_w = crop_size, crop_size
+        elif isinstance(crop_size, tuple):
+            self.crop_h, self.crop_w = crop_size
+        else:
+            raise ValueError('Invalid crop_size.')
+        
+        self.transform = transform
+        
+        with rasterio.open(image_path) as src:
+            image = src.read(channels)
+        # Map all values in [0, 1]
+        max_val = np.iinfo(image.dtype).max
+        self.image = image / max_val
+        
+        if self.crop_h > self.img_h or self.crop_w > self.img_w:
+            raise ValueError('crops_size is bigger than image size.')
+        
+        with rasterio.open(labels_path) as src:
+            self.labels = src.read(1)  # KEEPING the 0 label!
+    
+    def __len__(self):
+        return (self.img_h - self.crop_h + 1) * (self.img_w - self.crop_w + 1)
+    
+    def __getitem__(self, idx):
+        min_i, min_j = divmod(idx, self.img_w - self.crop_w + 1)
+        max_i, max_j = min_i + self.crop_h, min_j + self.crop_w  # non inclusive
+        
+        x = self.image[:, min_i : max_i, min_j : max_j]
+        y = self.labels[min_i : max_i, min_j : max_j]
+        
+        x = torch.tensor(x, dtype=torch.float32)
+        y = torch.tensor(y, dtype=torch.int64)
+        
+        if self.transform is not None:
+            x = self.transform(x)
+            
+        return x, y
+        
+    @property
+    def img_h(self):
+        return self.image.shape[-2]
+    
+    @property
+    def img_w(self):
+        return self.image.shape[-1]
+
+
+ds = CroppedDataset(train_x_paths[0], train_y_paths[0], crop_size=(250, 128))
+# %%
 
