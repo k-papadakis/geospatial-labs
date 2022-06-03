@@ -1,5 +1,6 @@
 # %%
 from pathlib import Path
+from matplotlib import transforms
 
 import numpy as np
 import matplotlib.pyplot as plt
@@ -22,6 +23,7 @@ import pytorch_lightning as pl
 from pytorch_lightning.callbacks import EarlyStopping, ModelCheckpoint
 from torchmetrics import Accuracy, ConfusionMatrix
 from torchsummary import summary
+from torchvision.transforms import Compose, RandomHorizontalFlip, RandomVerticalFlip
 
 RANDOM_STATE = 42
 
@@ -186,7 +188,7 @@ def train_mlp(x_train, y_train, x_test, y_test):
 
 class PatchDataset(Dataset):
     
-    def __init__(self, image_path, labels_path, patch_size, transform=None):
+    def __init__(self, image_path, labels_path, patch_size, channels=None, transform=None):
         super().__init__()
         
         self.image_path = image_path
@@ -195,7 +197,7 @@ class PatchDataset(Dataset):
         self.transform = transform
         
         with rasterio.open(image_path) as src:
-            image = src.read()
+            image = src.read(channels)
         
         # Map all values in [0, 1]
         max_val = np.iinfo(image.dtype).max
@@ -231,6 +233,20 @@ class PatchDataset(Dataset):
             
         return x, y
     
+class AugmentedDataset(Dataset):
+    """"Wraps a dataset to include a transform"""
+    
+    def __init__(self, dataset, transform):
+        self.dataset = dataset
+        self.transform = transform
+        
+    def __len__(self):
+        return len(self.dataset)
+    
+    def __getitem__(self, idx):
+        x, y = self.dataset[idx]
+        return self.transform(x), y
+
 
 def display_patch(dataset, idx, ax=None, rgb=(23, 11, 7)):
     if ax is None:
@@ -269,7 +285,18 @@ dataset_train, dataset_val, dataset_test = split_dataset(
     dataset, train_size=0.8, test_size=0.1
 )
 
+# Accuracy drops from 96% down to 62% if this is used...
+transform = Compose([RandomHorizontalFlip(), RandomVerticalFlip()])
+dataset_train_aug = AugmentedDataset(dataset_train, transform)
+
+# fig, axs = plt.subplots(5, 5, figsize=(12, 12))
+# for ax in axs.flat:
+#     display_patch(dataset_train_aug, 200, ax=ax)
+#     ax.set_axis_off()
+
+
 loader_train = DataLoader(dataset_train, batch_size=64, num_workers=8)
+loader_train_aug = DataLoader(dataset_train_aug, batch_size=64, num_workers=8)
 loader_val = DataLoader(dataset_val, batch_size=64, num_workers=8)
 loader_test = DataLoader(dataset_test, batch_size=64, num_workers=8)
 
@@ -277,6 +304,7 @@ loader_test = DataLoader(dataset_test, batch_size=64, num_workers=8)
 
 # %% 
 class LitCNN(pl.LightningModule):
+    
     def __init__(self, channels_in, n_classes, lr=1e-3):
         super().__init__()
 
@@ -374,20 +402,38 @@ def train_cnn():
         EarlyStopping(monitor='accuracy/val', mode='max', patience=3),
         ModelCheckpoint(monitor='accuracy/val', mode='max', save_last=True)
     ]
-    model = LitCNN(176, 14)
+    model = LitCNN(176, 14, lr=1e-3)
     trainer = pl.Trainer(
         accelerator='gpu', 
         max_epochs=20,
         callbacks=callbacks,
         default_root_dir='cnn_results'
     )
-    trainer.fit(model, train_dataloaders=loader_train, val_dataloaders=loader_val)
+    trainer.fit(model, train_dataloaders=loader_train_aug, val_dataloaders=loader_val)
 
     y_true = torch.cat([y for x, y in loader_test], 0)
     y_pred = torch.cat(trainer.predict(dataloaders=loader_test), 0)
     print(classification_report(y_true, y_pred))
     
     return trainer
-    
+
 
 # %%
+rgb_dataset = ConcatDataset([
+    PatchDataset(
+        image_path, labels_path, patch_size,
+        channels=(23, 11, 7)
+    )
+    for image_path, labels_path in zip(train_x_paths, train_y_paths)
+])
+rgb_dataset_train, rgb_dataset_val, rgb_dataset_test = split_dataset(
+    rgb_dataset, train_size=0.8, test_size=0.1
+)
+rgb_dataset_train_aug = AugmentedDataset(rgb_dataset_train, transform)
+
+rgb_loader_train = DataLoader(rgb_dataset_train, batch_size=64, num_workers=8)
+rgb_loader_train_aug = DataLoader(rgb_dataset_train_aug, batch_size=64, num_workers=8)
+rgb_loader_val = DataLoader(rgb_dataset_val, batch_size=64, num_workers=8)
+rgb_loader_test = DataLoader(rgb_dataset_test, batch_size=64, num_workers=8)
+
+
