@@ -1,7 +1,6 @@
 # %%
 from typing import Optional, Union, Tuple
 from pathlib import Path
-from matplotlib import transforms
 
 import numpy as np
 import matplotlib.pyplot as plt
@@ -19,7 +18,7 @@ from sklearn.preprocessing import StandardScaler
 import torch
 from torch import nn
 import torch.nn.functional as F
-from torch.utils.data import Dataset, DataLoader, TensorDataset, ConcatDataset, random_split
+from torch.utils.data import Dataset, DataLoader, TensorDataset, ConcatDataset, RandomSampler, Subset, random_split
 import pytorch_lightning as pl
 from pytorch_lightning.callbacks import EarlyStopping, ModelCheckpoint
 from torchmetrics import Accuracy, ConfusionMatrix
@@ -47,64 +46,69 @@ validation_x_paths = [
 
 
 # %%
-# STEP 1 - PLOT SAMPLES
 
-def plot_rgb(*paths, rgb=(23, 11, 7)):
-    fig, axs = plt.subplots(len(paths), figsize=(12, 12))
-
-    for p, ax in zip(paths, axs.flat):
-        p = Path(p)
-        with rasterio.open(p) as src:
-            img = src.read(rgb).transpose((1,2,0))
-            img = img / img.max()
-            ax.imshow(img)
-            ax.axis('off')
-            ax.set_title(p)
-        
-    return fig, axs
-
-
-# plot_rgb(*train_x_paths, *validation_x_paths) 
-# plt.show()
-
-# %% STEP 2 - TRAIN PIXEL-WISE
-
-def read_flattened_pixels(x_paths, y_paths):
-    x_lst = []
-    y_lst = []
-
+def read_data(x_paths, y_paths):
+    images = []
+    labels = []
     for x_path, y_path in zip(x_paths, y_paths):
         with rasterio.open(y_path) as y_src:
             y_img = y_src.read(1)
+            
         with rasterio.open(x_path) as x_src:
             x_img = x_src.read()
+        max_val = np.iinfo(x_img.dtype).max
+        x_img = x_img / max_val
         
-        mask = y_img != 0
-        y = y_img[mask]
-        x = x_img[:, mask]
+        images.append(x_img)
+        labels.append(y_img)
+        
+    return images, labels
 
+
+images, label_images = read_data(train_x_paths, train_y_paths)
+
+# %%
+# STEP 1 - PLOT SAMPLES
+
+def plot_rgb(images, names, rgb=(23, 11, 7)):
+    fig, axs = plt.subplots(len(images), figsize=(12, 8))
+    for image, name, ax in zip(images, names, axs.flat):
+        image = image[rgb, ...]
+        image = image.transpose((1,2,0))
+        image = image / image.max()
+        ax.imshow(image)
+        ax.axis('off')
+        ax.set_title(name)
+        
+    return fig, axs
+
+# res = plot_rgb(images, train_x_paths) 
+# plt.show()
+
+# %% STEP 2 - TRAIN PIXEL-WISE
+def make_pixel_dataset(images, label_images):
+    x_lst = []
+    y_lst = []
+    for x, y in zip(images, label_images):
+        mask = y != 0
+        y = y[mask]
+        x = x[:, mask]
         x_lst.append(x)
         y_lst.append(y)
-
     x = np.concatenate(x_lst, 1).T
-    # Map all values in [0, 1]
-    max_val = np.iinfo(x.dtype).max
-    x = x / max_val
     y = np.concatenate(y_lst, 0)
     # Remap labels 1..14 --> 0..13
     y = y - 1
-
     return x, y
 
 
-x_train, x_test, y_train, y_test = train_test_split(
-    *read_flattened_pixels(train_x_paths, train_y_paths),
-    test_size=0.2
-)
-
 # %% Train SVM and RF
 
-def train_traditional(x_train, y_train, x_test, y_test):
+def train_traditional():
+    x_train, x_test, y_train, y_test = train_test_split(
+        *make_pixel_dataset(images, label_images),
+        test_size=0.2, random_state=RANDOM_STATE
+    )
     models = [
         make_pipeline(StandardScaler(), SVC(C=1.0, kernel='rbf')),
         RandomForestClassifier(n_estimators=10),
@@ -112,8 +116,6 @@ def train_traditional(x_train, y_train, x_test, y_test):
 
     for model in models:
         model.fit(x_train, y_train)
-        
-    for model in models:
         y_pred = model.predict(x_test)
         print(type(model).__name__)
         print(classification_report(y_test, y_pred))
@@ -163,7 +165,11 @@ class LitMLP(pl.LightningModule):
         return optimizer
 
 
-def train_mlp(x_train, y_train, x_test, y_test):
+def train_mlp(images, label_images):
+    x_train, x_test, y_train, y_test = train_test_split(
+        *make_pixel_dataset(images, label_images),
+        test_size=0.2, random_state=RANDOM_STATE
+    )
     train_dataset = TensorDataset(torch.Tensor(x_train), torch.LongTensor(y_train))
     train_loader = DataLoader(train_dataset, batch_size=64, shuffle=True, num_workers=16)
     test_dataset = TensorDataset(torch.Tensor(x_test), torch.LongTensor(y_test))
@@ -189,39 +195,32 @@ def train_mlp(x_train, y_train, x_test, y_test):
 
 class PatchDataset(Dataset):
     
-    def __init__(self, image_path, labels_path, patch_size, channels=None, transform=None):
+    def __init__(self, image, label_image, patch_size, channels=None, transform=None):
         super().__init__()
         
+        self.image = image
+        self.channels = channels if channels is not None else slice(None)
+            
+        # Keep only the pixels that are labelled and whose patch lies inside the image 
+        r = patch_size // 2
+        is_inner = np.full_like(label_image, False, bool)
+        is_inner[r:-r, r:-r] = True
+        self.indices = np.nonzero((label_image != 0) & is_inner)
+
+        self.labels = label_image[self.indices]
+        # Remap labels 1..14 --> 0..13
+        self.labels = self.labels - 1
+            
         self.patch_size = patch_size
         self.transform = transform
         
-        with rasterio.open(image_path) as src:
-            image = src.read(channels)
-        
-        # Map all values in [0, 1]
-        max_val = np.iinfo(image.dtype).max
-        self.image = image / max_val
-            
-        with rasterio.open(labels_path) as src:
-            labels = src.read(1)
-        
-        # Keep only the pixels that are labelled and whose patch lies inside the image 
-        r = patch_size // 2
-        is_inner = np.full_like(labels, False, bool)
-        is_inner[r:-r, r:-r] = True
-        self.indices = np.nonzero((labels != 0) & is_inner)
-        
-        self.labels = labels[self.indices]
-        # Remap labels 1..14 --> 0..13
-        self.labels -= 1
-            
     def __len__(self):
         return len(self.labels)
     
     def __getitem__(self, idx):
         i, j = self.indices[0][idx], self.indices[1][idx]
         r = self.patch_size // 2
-        x = self.image[:, i-r : i+r+1, j-r : j+r+1]
+        x = self.image[self.channels, i-r : i+r+1, j-r : j+r+1]
         y = self.labels[idx]
         
         x = torch.tensor(x, dtype=torch.float32)
@@ -255,10 +254,11 @@ def display_patch(dataset, idx, ax=None, rgb=(23, 11, 7)):
     img = img / img.max()
     img = torch.permute(img, (1, 2, 0))
     ax.imshow(img)
+    ax.set_axis_off()
     return ax
 
 
-def split_dataset(dataset, train_size, test_size=0., seed=RANDOM_STATE):
+def split_dataset(dataset, train_size, test_size=0., seed=None):
     if not 0 <= train_size + test_size <= 1:
         raise ValueError('Invalid train/test sizes')
     n = len(dataset)
@@ -274,19 +274,17 @@ def split_dataset(dataset, train_size, test_size=0., seed=RANDOM_STATE):
 
 
 patch_size = 15
-
-dataset = ConcatDataset(
-    [PatchDataset(image_path, labels_path, patch_size)
-     for image_path, labels_path in zip(train_x_paths, train_y_paths)]
-)
-
-dataset_train, dataset_val, dataset_test = split_dataset(
-    dataset, train_size=0.8, test_size=0.1
-)
-
-# Accuracy drops from 96% down to 62% if this is used...
 transform = Compose([RandomHorizontalFlip(), RandomVerticalFlip()])
-dataset_train_aug = AugmentedDataset(dataset_train, transform)
+
+patch_dataset = ConcatDataset([
+    PatchDataset(image, label_image, patch_size)
+    for image, label_image in zip(images, label_images)
+])
+
+patch_dataset_train, patch_dataset_val, patch_dataset_test = split_dataset(
+    patch_dataset, train_size=0.8, test_size=0.1, seed=RANDOM_STATE
+)
+patch_dataset_train_aug = AugmentedDataset(patch_dataset_train, transform)
 
 # fig, axs = plt.subplots(5, 5, figsize=(12, 12))
 # for ax in axs.flat:
@@ -294,10 +292,10 @@ dataset_train_aug = AugmentedDataset(dataset_train, transform)
 #     ax.set_axis_off()
 
 
-loader_train = DataLoader(dataset_train, batch_size=64, shuffle=True, num_workers=8)
-loader_train_aug = DataLoader(dataset_train_aug, batch_size=64, shuffle=True, num_workers=8)
-loader_val = DataLoader(dataset_val, batch_size=64, num_workers=8)
-loader_test = DataLoader(dataset_test, batch_size=64, num_workers=8)
+loader_train = DataLoader(patch_dataset_train, batch_size=64, shuffle=True, num_workers=8)
+loader_train_aug = DataLoader(patch_dataset_train_aug, batch_size=64, shuffle=True, num_workers=8)
+loader_val = DataLoader(patch_dataset_val, batch_size=64, num_workers=8)
+loader_test = DataLoader(patch_dataset_test, batch_size=64, num_workers=8)
 
 
 # %% 
@@ -418,14 +416,11 @@ def train_cnn():
 
 # %%
 rgb_dataset = ConcatDataset([
-    PatchDataset(
-        image_path, labels_path, patch_size,
-        channels=(23, 11, 7)
-    )
-    for image_path, labels_path in zip(train_x_paths, train_y_paths)
+    PatchDataset(image, label_image, patch_size, channels=(23, 11, 7))
+    for image, label_image in zip(images, label_images)
 ])
 rgb_dataset_train, rgb_dataset_val, rgb_dataset_test = split_dataset(
-    rgb_dataset, train_size=0.8, test_size=0.1
+    rgb_dataset, train_size=0.8, test_size=0.1, seed=RANDOM_STATE
 )
 rgb_dataset_train_aug = AugmentedDataset(rgb_dataset_train, transform)
 
@@ -439,12 +434,15 @@ rgb_loader_test = DataLoader(rgb_dataset_test, batch_size=64, num_workers=8)
 
 class CroppedDataset(Dataset):
     
-    def __init__(self, image_path, labels_path,
+    def __init__(self, image, labels_image,
                  crop_size: Union[int, Tuple[int, int]],
                  channels: Optional[Tuple[int, ...]] = None,
                  transform=None,
     ):
         super().__init__()
+        
+        self.image = image
+        self.labels = labels_image
         
         if isinstance(crop_size, int):
             self.crop_h, self.crop_w = crop_size, crop_size
@@ -453,20 +451,12 @@ class CroppedDataset(Dataset):
         else:
             raise ValueError('Invalid crop_size.')
         
-        self.transform = transform
-        
-        with rasterio.open(image_path) as src:
-            image = src.read(channels)
-        # Map all values in [0, 1]
-        max_val = np.iinfo(image.dtype).max
-        self.image = image / max_val
-        
         if self.crop_h > self.img_h or self.crop_w > self.img_w:
             raise ValueError('crops_size is bigger than image size.')
         
-        with rasterio.open(labels_path) as src:
-            self.labels = src.read(1)  # KEEPING the 0 label!
-    
+        self.channels = channels if channels is not None else slice(None)
+        self.transform = transform
+        
     def __len__(self):
         return (self.img_h - self.crop_h + 1) * (self.img_w - self.crop_w + 1)
     
@@ -474,7 +464,7 @@ class CroppedDataset(Dataset):
         min_i, min_j = divmod(idx, self.img_w - self.crop_w + 1)
         max_i, max_j = min_i + self.crop_h, min_j + self.crop_w  # non inclusive
         
-        x = self.image[:, min_i : max_i, min_j : max_j]
+        x = self.image[self.channels, min_i : max_i, min_j : max_j]
         y = self.labels[min_i : max_i, min_j : max_j]
         
         x = torch.tensor(x, dtype=torch.float32)
@@ -494,6 +484,24 @@ class CroppedDataset(Dataset):
         return self.image.shape[-1]
 
 
-ds = CroppedDataset(train_x_paths[0], train_y_paths[0], crop_size=(250, 128))
-# %%
+# %% 
+crop_size = 249
+cropped_dataset = ConcatDataset([
+    CroppedDataset(image, labels_image, crop_size=crop_size)
+    for image, labels_image in zip(images, label_images)
+])
+indices = range(0, len(cropped_dataset), len(cropped_dataset) // 99)  # 102 points
+cropped_dataset = Subset(cropped_dataset, indices)
+# display_patch(cropped_dataset, 10)
 
+cropped_dataset_train, cropped_dataset_val, cropped_dataset_test = split_dataset(
+    cropped_dataset, train_size=0.8, test_size=0.1, seed=RANDOM_STATE
+)
+cropped_dataset_train_aug = AugmentedDataset(cropped_dataset_train, transform)
+
+cropped_loader_train = DataLoader(cropped_dataset_train, batch_size=1, shuffle=True, num_workers=0)
+cropped_loader_train_aug = DataLoader(cropped_dataset_train_aug, batch_size=1, shuffle=True, num_workers=0)
+cropped_loader_val = DataLoader(cropped_dataset_val, batch_size=1, num_workers=0)
+cropped_loader_test = DataLoader(cropped_dataset_test, batch_size=1, num_workers=0)
+
+# %%
