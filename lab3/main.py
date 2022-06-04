@@ -4,8 +4,8 @@ import random
 import csv
 
 import numpy as np
+import matplotlib as mpl
 import matplotlib.pyplot as plt
-from matplotlib.colors import ListedColormap
 
 import rasterio
 
@@ -78,7 +78,6 @@ def read_info(path) -> Dict[int, Dict]:
 
 images, label_images = read_data(TRAIN_X_PATHS, TRAIN_Y_PATHS)
 info = read_info(INFO_PATH)
-cmap = ListedColormap(info['color'])
 
 # %%
 # STEP 1 - PLOT SAMPLES
@@ -561,7 +560,6 @@ cropped_dataset = ConcatDataset(cropped_datasets_lst)
 cropped_dataset_train, cropped_dataset_val, cropped_dataset_test = split_dataset(
     cropped_dataset, train_size=0.7, test_size=0.2, seed=RANDOM_STATE
 )
-    
 cropped_dataset_train_aug = AugmentedDataset(
     cropped_dataset_train, transform=flip_and_rotate, apply_on_target=True
 )
@@ -589,8 +587,19 @@ def display_segmentation(dataset, idx, rgb=(23, 11, 7), cmap=None, axs=None):
     
     return axs
 
-# fig, axs = plt.subplots(4, 2, figsize=(4, 8))
-# for ax1, ax2 in axs:
-#     display_segmentation(cropped_dataset_train_aug, 0, cmap=cmap, axs=(ax1, ax2))
+cmap = mpl.colors.ListedColormap(info['color'])
+
+fig, axs = plt.subplots(4, 2, figsize=(4, 8))
+for ax1, ax2 in axs:
+    display_segmentation(cropped_dataset_train_aug, 0, cmap=cmap, axs=(ax1, ax2))
+
+norm = mpl.colors.Normalize(0, cmap.N)
+cbar = fig.colorbar(
+    mpl.cm.ScalarMappable(norm=norm, cmap=cmap),
+    ax=axs, shrink=0.9, location='right'
+)
+cbar.set_ticks(0.5 + np.arange(cmap.N))
+cbar.set_ticklabels(info['name'])
+
 
 # %%
