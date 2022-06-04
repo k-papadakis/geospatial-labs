@@ -8,25 +8,22 @@ import matplotlib.pyplot as plt
 from matplotlib.colors import ListedColormap
 
 import rasterio
-from rasterio.windows import Window
 
-from sklearn.model_selection import cross_val_score, train_test_split
+from sklearn.model_selection import train_test_split
 from sklearn.svm import SVC
 from sklearn.ensemble import RandomForestClassifier
-from sklearn.neural_network import MLPClassifier
 from sklearn.metrics import classification_report
-from sklearn.pipeline import Pipeline, make_pipeline
+from sklearn.pipeline import make_pipeline
 from sklearn.preprocessing import StandardScaler
 
 import torch
-from torch import nn, tensor
+from torch import nn
 import torch.nn.functional as F
-from torch.utils.data import Dataset, DataLoader, TensorDataset, ConcatDataset, RandomSampler, Subset, random_split
+from torch.utils.data import Dataset, DataLoader, TensorDataset, ConcatDataset, Subset, random_split
 import pytorch_lightning as pl
 from pytorch_lightning.callbacks import EarlyStopping, ModelCheckpoint
 from torchmetrics import Accuracy, ConfusionMatrix
 from torchsummary import summary
-from torchvision.transforms import Compose, RandomHorizontalFlip, RandomVerticalFlip
 import torchvision.transforms.functional as TF 
 
 RANDOM_STATE = 42
@@ -314,7 +311,7 @@ def flip_and_rotate(*tensors):
     
     # Undo the expansion
     for idx in expanded:
-        tensors[idx] = torch.squeeze(tensors[i], 0)
+        tensors[idx] = torch.squeeze(tensors[idx], 0)
 
     return tuple(tensors) if len(tensors) > 1 else tensors[0]
 
