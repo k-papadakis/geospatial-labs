@@ -1,5 +1,6 @@
 # %%
 from typing import Dict, Optional, Union, Tuple
+import itertools
 import random
 import csv
 
@@ -473,16 +474,18 @@ rgb_loader_test = DataLoader(rgb_dataset_test, batch_size=64, num_workers=8)
 # %%
 
 class CroppedDataset(Dataset):
+    """Sliding window over an image and its label"""
     
-    def __init__(self, image, labels_image,
+    def __init__(self, image, label_image,
                  crop_size: Union[int, Tuple[int, int]],
+                 stride: Union[int, Tuple[int, int]],
                  channels: Optional[Tuple[int, ...]] = None,
                  transform=None,
     ):
         super().__init__()
         
         self.image = image
-        self.labels = labels_image
+        self.labels = label_image
         
         if isinstance(crop_size, int):
             self.crop_h, self.crop_w = crop_size, crop_size
@@ -494,6 +497,13 @@ class CroppedDataset(Dataset):
         if self.crop_h > self.img_h or self.crop_w > self.img_w:
             raise ValueError('crops_size is bigger than image size.')
         
+        if isinstance(stride, int):
+            self.stride_h, self.stride_w = stride, stride
+        elif isinstance(stride, tuple):
+            self.stride_h, self.stride_w = stride
+        else:
+            raise ValueError('Invalid stride.')
+        
         self.channels = channels
         self.transform = transform
         
@@ -501,7 +511,7 @@ class CroppedDataset(Dataset):
         return self.n_rows * self.n_cols
     
     def __getitem__(self, idx):
-        min_i, min_j, max_i, max_j = self.index_to_bounds(idx)
+        min_i, min_j, max_i, max_j = self.get_bounds(idx)
         channels = self.channels if self.channels is not None else slice(None)
         x = self.image[channels, min_i : max_i, min_j : max_j]
         y = self.labels[min_i : max_i, min_j : max_j]
@@ -511,14 +521,13 @@ class CroppedDataset(Dataset):
         
         if self.transform:
             x, y = self.transform(x, y)
-            
+         
         return x, y
-    
-    def index_to_bounds(self, idx):
-        min_i, min_j = divmod(idx, self.n_cols)
-        # Max bound is exclusive
-        max_i = min_i + self.crop_h
-        max_j = min_j + self.crop_w
+
+    def get_bounds(self, idx):
+        r, c = divmod(idx, self.n_cols)
+        min_i, min_j = r * self.stride_h, c * self.stride_w
+        max_i, max_j = min_i + self.crop_h, min_j + self.crop_w
         return min_i, min_j, max_i, max_j
         
     @property
@@ -531,31 +540,24 @@ class CroppedDataset(Dataset):
     
     @property
     def n_rows(self):
-        return self.img_h - self.crop_h + 1
-    
+        return 1 + (self.img_h - self.crop_h)//self.stride_h
+        
     @property
     def n_cols(self):
-        return self.img_w - self.crop_w + 1
+        return 1 + (self.img_w - self.crop_w)//self.stride_w
+    
+    
+ds = CroppedDataset(images[1], label_images[1], 64, 64//4)
 
 
 # %%
-# One image has height 249 while the other has 250
-# We will use crop_height 249 for both,
-# and ignore the last row of pixels of
-# the image with height 250.
-# The crop width will be equal to crop_height = 249.
-# We will slide the crop window on the first row with
-# step crop_width // 4 so that there is some overlap.
-crop_size = 249
-cropped_datasets_lst = []
-for image, label_image in zip(images, label_images):
-    ds = CroppedDataset(image, label_image, crop_size)
-    indices = range(0, ds.n_cols, ds.crop_w // 4)
-    ds = Subset(ds, indices)
-    cropped_datasets_lst.append(ds)
-cropped_dataset = ConcatDataset(cropped_datasets_lst)
-# display_patch(cropped_dataset, 0)
-# display_patch(cropped_dataset, 1)
+crop_size = 64
+stride = crop_size // 4
+
+cropped_dataset = ConcatDataset([
+    CroppedDataset(image, label_image, crop_size, stride)
+    for image, label_image in zip(images, label_images)
+])
 
 cropped_dataset_train, cropped_dataset_val, cropped_dataset_test = split_dataset(
     cropped_dataset, train_size=0.7, test_size=0.2, seed=RANDOM_STATE
@@ -568,9 +570,15 @@ cropped_dataset_train_aug = AugmentedDataset(
 cropped_loader_train_aug = DataLoader(cropped_dataset_train_aug, batch_size=1, shuffle=True, num_workers=0)
 cropped_loader_val = DataLoader(cropped_dataset_val, batch_size=1, num_workers=0)
 cropped_loader_test = DataLoader(cropped_dataset_test, batch_size=1, num_workers=0)
-    
+        
+
 # %%
-def display_segmentation(dataset, idx, rgb=(23, 11, 7), cmap=None, axs=None):
+def display_segmentation(
+    dataset, idx,
+    cmap=mpl.colors.ListedColormap(info['color']),
+    names=info['name'],
+    rgb=(23, 11, 7), axs=None
+):
     if axs is None:
         fig, axs = plt.subplots(ncols=2)
         
@@ -585,21 +593,18 @@ def display_segmentation(dataset, idx, rgb=(23, 11, 7), cmap=None, axs=None):
     axs[0].set_axis_off()
     axs[1].set_axis_off()
     
-    return axs
+    norm = mpl.colors.Normalize(0, cmap.N)
+    cbar = fig.colorbar(
+        mpl.cm.ScalarMappable(norm=norm, cmap=cmap),
+        ax=axs, shrink=0.9, location='right'
+    )
+    cbar.set_ticks(0.5 + np.arange(cmap.N))
+    cbar.set_ticklabels(names)
+    
+    return fig, axs
 
-# cmap = mpl.colors.ListedColormap(info['color'])
 
-# fig, axs = plt.subplots(4, 2, figsize=(4, 8))
-# for ax1, ax2 in axs:
-#     display_segmentation(cropped_dataset_train_aug, 0, cmap=cmap, axs=(ax1, ax2))
-
-# norm = mpl.colors.Normalize(0, cmap.N)
-# cbar = fig.colorbar(
-#     mpl.cm.ScalarMappable(norm=norm, cmap=cmap),
-#     ax=axs, shrink=0.9, location='right'
-# )
-# cbar.set_ticks(0.5 + np.arange(cmap.N))
-# cbar.set_ticklabels(info['name'])
+_ = display_segmentation(cropped_dataset_train_aug, 1100)
 
 
 # %% U-Net Implementation
@@ -743,7 +748,7 @@ def train_unet():
     return trainer
     
 
-train_unet()       
+train_unet()
         
 
 # TODO: Move the mask out of the model?
