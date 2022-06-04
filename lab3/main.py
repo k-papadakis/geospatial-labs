@@ -1,5 +1,5 @@
 # %%
-from typing import Any, Dict, Hashable, Optional, Union, Tuple
+from typing import Dict, Optional, Union, Tuple
 import random
 import csv
 
@@ -565,9 +565,9 @@ cropped_dataset_train_aug = AugmentedDataset(
 )
 # print(*map(len, (cropped_dataset_train_aug, cropped_dataset_val, cropped_dataset_test)))
 
-cropped_loader_train_aug = DataLoader(cropped_dataset_train_aug, batch_size=1, shuffle=True, num_workers=1)
-cropped_loader_val = DataLoader(cropped_dataset_val, batch_size=1, num_workers=1)
-cropped_loader_test = DataLoader(cropped_dataset_test, batch_size=1, num_workers=1)
+cropped_loader_train_aug = DataLoader(cropped_dataset_train_aug, batch_size=1, shuffle=True, num_workers=0)
+cropped_loader_val = DataLoader(cropped_dataset_val, batch_size=1, num_workers=0)
+cropped_loader_test = DataLoader(cropped_dataset_test, batch_size=1, num_workers=0)
     
 # %%
 def display_segmentation(dataset, idx, rgb=(23, 11, 7), cmap=None, axs=None):
@@ -587,19 +587,165 @@ def display_segmentation(dataset, idx, rgb=(23, 11, 7), cmap=None, axs=None):
     
     return axs
 
-cmap = mpl.colors.ListedColormap(info['color'])
+# cmap = mpl.colors.ListedColormap(info['color'])
 
-fig, axs = plt.subplots(4, 2, figsize=(4, 8))
-for ax1, ax2 in axs:
-    display_segmentation(cropped_dataset_train_aug, 0, cmap=cmap, axs=(ax1, ax2))
+# fig, axs = plt.subplots(4, 2, figsize=(4, 8))
+# for ax1, ax2 in axs:
+#     display_segmentation(cropped_dataset_train_aug, 0, cmap=cmap, axs=(ax1, ax2))
 
-norm = mpl.colors.Normalize(0, cmap.N)
-cbar = fig.colorbar(
-    mpl.cm.ScalarMappable(norm=norm, cmap=cmap),
-    ax=axs, shrink=0.9, location='right'
-)
-cbar.set_ticks(0.5 + np.arange(cmap.N))
-cbar.set_ticklabels(info['name'])
+# norm = mpl.colors.Normalize(0, cmap.N)
+# cbar = fig.colorbar(
+#     mpl.cm.ScalarMappable(norm=norm, cmap=cmap),
+#     ax=axs, shrink=0.9, location='right'
+# )
+# cbar.set_ticks(0.5 + np.arange(cmap.N))
+# cbar.set_ticklabels(info['name'])
 
+
+# %% U-Net Implementation
+class ConvBlock(nn.Module):
+    
+    def __init__(self, in_channels, out_channels, kernel_size=3):
+        super().__init__()
+        self.model = nn.Sequential(
+            nn.Conv2d(in_channels, out_channels, kernel_size, padding='same', bias=False),
+            nn.BatchNorm2d(out_channels),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(out_channels, out_channels, kernel_size, padding='same', bias=False),
+            nn.BatchNorm2d(out_channels),
+            nn.ReLU(inplace=True)
+        )
+        
+    def forward(self, x):
+        return self.model(x)
+    
+
+class DownBlock(nn.Module):
+    
+    def __init__(self, in_channels, out_channels):
+        super().__init__()
+        self.model = nn.Sequential(
+            nn.MaxPool2d(2),
+            ConvBlock(in_channels, out_channels)
+        )
+        
+    def forward(self, x):
+        return self.model(x)
+    
+    
+class UpBlock(nn.Module):
+    
+    def __init__(self, in_channels, out_channels):
+        super().__init__()
+        self.convt = nn.ConvTranspose2d(in_channels, out_channels, 2, 2)
+        self.conv = ConvBlock(in_channels, out_channels)  # in_channels because of concat
+        
+    
+    def forward(self, x, x_res):
+        x = self.convt(x)
+        dh = x_res.shape[-2] - x.shape[-2]
+        dw = x_res.shape[-1] - x.shape[-1]
+        assert dh >= 0 and dw >= 0
+        padding = dh//2, dh - dh//2, dw//2, dw - dw//2
+        x = F.pad(x, padding)
+        x_cat = torch.cat((x, x_res), -3)
+        return self.conv(x_cat)
+
+
+class UNet(nn.Module):
+    
+    def __init__(self, n_channels, n_classes):
+        super().__init__()
+        self.n_channels = n_channels
+        self.n_classes = n_classes
+        
+        self.entrance = ConvBlock(n_channels, 64)
+        self.down1 = DownBlock(64, 128)
+        self.down2 = DownBlock(128, 256)
+        self.down3 = DownBlock(256, 512)
+        self.down4 = DownBlock(512, 1024)
+        self.up1 = UpBlock(1024, 512)
+        self.up2 = UpBlock(512, 256)
+        self.up3 = UpBlock(256, 128)
+        self.up4 = UpBlock(128, 64)
+        self.exit = nn.Conv2d(64, n_classes, 1)
+        
+    def forward(self, x):
+        a1 = self.entrance(x)
+        a2 = self.down1(a1)
+        a3 = self.down2(a2)
+        a4 = self.down3(a3)
+        t = self.down4(a4)
+        b1 = self.up1(t, a4)
+        b2 = self.up2(b1, a3)
+        b3 = self.up3(b2, a2)
+        b4 = self.up4(b3, a1)
+        return self.exit(b4)
+    
+
+class LitUNet(pl.LightningModule):
+    
+    def __init__(self, n_channels, n_classes, lr):
+        super().__init__()
+        self.model = UNet(n_channels, n_classes)
+        self.lr = lr
+    
+    def forward(self, x):
+        return self.model(x)
+    
+    def training_step(self, batch, batch_idx):
+        x, y = batch
+        mask = y != 0
+        logits = self.model(x)
+        logits = self(x)
+        logits = torch.permute(logits, (0, 2, 3, 1))  # logits last
+        loss = F.cross_entropy(logits[mask, ...], y[mask] - 1) # relabelling 0..14 --> 1..15
+        
+        self.log('loss/train', loss)
+        
+        return loss
+    
+    def validation_step(self, batch, batch_idx):
+        x, y = batch
+        mask = y != 0
+        logits = self.model(x)
+        logits = self(x)
+        logits = torch.permute(logits, (0, 2, 3, 1))  # logits last
+        loss = F.cross_entropy(logits[mask, ...], y[mask] - 1)  # relabelling 0..14 --> 1..15
+        
+        self.log('loss/val', loss)
+        
+        return loss
+    
+    def configure_optimizers(self):
+        optimizer = torch.optim.Adam(self.parameters(), lr=self.lr)
+        return optimizer
+    
+    
+def train_unet():
+    callbacks = [
+        # EarlyStopping(monitor='accuracy/val', mode='max', patience=3),
+        # ModelCheckpoint(monitor='accuracy/val', mode='max', save_last=True)
+    ]
+    model = LitUNet(176, 14, lr=1e-3)
+    trainer = pl.Trainer(
+        accelerator='cpu', 
+        max_epochs=20,
+        callbacks=callbacks,
+        default_root_dir='unet_results'
+    )
+    trainer.fit(model, train_dataloaders=cropped_loader_train_aug, val_dataloaders=cropped_loader_val)
+
+    # y_true = torch.cat([y for x, y in cropped_loader_test], 0)
+    # y_pred = torch.cat(trainer.predict(dataloaders=cropped_loader_test), 0)
+    # print(classification_report(y_true, y_pred))
+    
+    return trainer
+    
+
+train_unet()       
+        
+
+# TODO: Move the mask out of the model?
 
 # %%
