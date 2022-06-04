@@ -23,7 +23,7 @@ import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader, TensorDataset, ConcatDataset, Subset, random_split
 import pytorch_lightning as pl
 from pytorch_lightning.callbacks import EarlyStopping, ModelCheckpoint
-from torchmetrics import Accuracy, ConfusionMatrix
+import torchmetrics
 from torchsummary import summary
 import torchvision.transforms.functional as TF 
 
@@ -152,6 +152,9 @@ class LitMLP(pl.LightningModule):
             nn.ReLU(),
             nn.Linear(128, dim_out),
         )
+        self.train_accuracy = torchmetrics.Accuracy()
+        self.val_accuracy = torchmetrics.Accuracy()
+        self.save_hyperparameters()
         
     def forward(self, x):
         return self.model(x)
@@ -164,14 +167,26 @@ class LitMLP(pl.LightningModule):
     
     def training_step(self, batch,  batch_idx):
         x, y = batch
-        loss = F.cross_entropy(self(x), y)
-        self.log('train_loss', loss)
+        logits = self(x)
+        
+        loss = F.cross_entropy(logits, y)
+        self.log('loss/train', loss)
+        
+        self.train_accuracy(logits, y)
+        self.log('accuracy/train', self.train_accuracy)
+        
         return loss
     
     def validation_step(self, batch,  batch_idx):
         x, y = batch
-        loss = F.cross_entropy(self(x), y)
-        self.log('val_loss', loss)
+        logits = self(x)
+        
+        loss = F.cross_entropy(logits, y)
+        self.log('loss/val', loss)
+        
+        self.val_accuracy(logits, y)
+        self.log('accuracy/val', self.val_accuracy)
+        
 
     def configure_optimizers(self):
         optimizer = torch.optim.Adam(self.parameters(), lr=1e-3, weight_decay=1e-5)
@@ -194,8 +209,14 @@ def train_mlp(images, label_images):
     
     callbacks = [
         # EarlyStopping(monitor='val_loss', mode='min', patience=3, min_delta=1e-2),
+        ModelCheckpoint(monitor='accuracy/val', mode='max', save_last=True),
     ]
-    trainer = pl.Trainer(max_epochs=10, accelerator='gpu', callbacks=callbacks)
+    trainer = pl.Trainer(
+        max_epochs=10,
+        accelerator='gpu',
+        callbacks=callbacks,
+        default_root_dir='mlp_results'
+    )
     trainer.fit(mlp, train_loader, test_loader)
 
     y_pred = torch.cat(trainer.predict(mlp, test_loader), 0)
@@ -383,8 +404,8 @@ class LitCNN(pl.LightningModule):
         )
         
         self.lr = lr
-        self.train_accuracy = Accuracy()
-        self.val_accuracy = Accuracy()
+        self.train_accuracy = torchmetrics.Accuracy()
+        self.val_accuracy = torchmetrics.Accuracy()
         self.save_hyperparameters()
 
     def forward(self, x):
@@ -433,8 +454,9 @@ class LitCNN(pl.LightningModule):
         return optimizer
     
 
-
 def train_cnn():
+    # WARNING! YOU WILL GET GOOD RESULTS BECAUSE THE IMAGES IN TRAIN AND TEST OVERLAP!
+    # The labels don't, but because the labels are locally continuous, we have information leakage via the images!
     callbacks = [
         EarlyStopping(monitor='accuracy/val', mode='max', patience=3),
         ModelCheckpoint(monitor='accuracy/val', mode='max', save_last=True)
@@ -478,7 +500,7 @@ class CroppedDataset(Dataset):
     
     def __init__(self, image, label_image,
                  crop_size: Union[int, Tuple[int, int]],
-                 stride: Union[int, Tuple[int, int]],
+                 stride: Union[int, Tuple[int, int]] = 1,
                  channels: Optional[Tuple[int, ...]] = None,
                  transform=None,
     ):
@@ -551,13 +573,18 @@ ds = CroppedDataset(images[1], label_images[1], 64, 64//4)
 
 
 # %%
-crop_size = 64
-stride = crop_size // 4
+# Sliding window with stride equal to window size
+# so that no part from the training images exist in the validation images.
 
 cropped_dataset = ConcatDataset([
-    CroppedDataset(image, label_image, crop_size, stride)
+    CroppedDataset(image, label_image, 62, 62)  # 62*4 = 248 < 249 and 250, the heights of the images
     for image, label_image in zip(images, label_images)
 ])
+
+# # This favors patches away from the border. It's not uniform sampling.
+# rng = np.random.default_rng(RANDOM_STATE)
+# indices = rng.integers(0, len(cropped_dataset), 500)
+# cropped_dataset = Subset(cropped_dataset, indices)
 
 cropped_dataset_train, cropped_dataset_val, cropped_dataset_test = split_dataset(
     cropped_dataset, train_size=0.7, test_size=0.2, seed=RANDOM_STATE
@@ -567,9 +594,9 @@ cropped_dataset_train_aug = AugmentedDataset(
 )
 # print(*map(len, (cropped_dataset_train_aug, cropped_dataset_val, cropped_dataset_test)))
 
-cropped_loader_train_aug = DataLoader(cropped_dataset_train_aug, batch_size=1, shuffle=True, num_workers=0)
-cropped_loader_val = DataLoader(cropped_dataset_val, batch_size=1, num_workers=0)
-cropped_loader_test = DataLoader(cropped_dataset_test, batch_size=1, num_workers=0)
+cropped_loader_train_aug = DataLoader(cropped_dataset_train_aug, batch_size=16, shuffle=True, num_workers=1)
+cropped_loader_val = DataLoader(cropped_dataset_val, batch_size=16, num_workers=1)
+cropped_loader_test = DataLoader(cropped_dataset_test, batch_size=16, num_workers=1)
         
 
 # %%
@@ -604,7 +631,7 @@ def display_segmentation(
     return fig, axs
 
 
-_ = display_segmentation(cropped_dataset_train_aug, 1100)
+# _ = display_segmentation(cropped_dataset_train_aug, 1100)
 
 
 # %% U-Net Implementation
@@ -685,28 +712,48 @@ class UNet(nn.Module):
         b2 = self.up2(b1, a3)
         b3 = self.up3(b2, a2)
         b4 = self.up4(b3, a1)
-        return self.exit(b4)
-    
+        logits = self.exit(b4)
+        logits = torch.permute(logits, (0, 2, 3, 1))  # logits last
+        return logits
 
 class LitUNet(pl.LightningModule):
     
-    def __init__(self, n_channels, n_classes, lr):
+    def __init__(self, n_channels, n_classes, lr=1e-4):
         super().__init__()
         self.model = UNet(n_channels, n_classes)
         self.lr = lr
+        self.train_dice = torchmetrics.Dice()
+        self.val_dice = torchmetrics.Dice()
+        self.train_accuracy = torchmetrics.Accuracy()
+        self.val_accuracy = torchmetrics.Accuracy()
+        self.save_hyperparameters()
     
     def forward(self, x):
         return self.model(x)
     
+    def predict_step(self, batch, batch_idx):
+        x, y = batch
+        logits = self(x)
+        pred = torch.argmax(logits, -1)
+        return pred
+    
     def training_step(self, batch, batch_idx):
         x, y = batch
-        mask = y != 0
-        logits = self.model(x)
-        logits = self(x)
-        logits = torch.permute(logits, (0, 2, 3, 1))  # logits last
-        loss = F.cross_entropy(logits[mask, ...], y[mask] - 1) # relabelling 0..14 --> 1..15
         
+        # TODO: Move the mask out of the model?
+        mask = y != 0
+        logits = self(x)
+        logits = logits[mask, ...]
+        y = y[mask] - 1  # relabelling 1..15 --> 0..14
+        
+        loss = F.cross_entropy(logits, y)
         self.log('loss/train', loss)
+        
+        self.train_accuracy(logits, y)
+        self.log('accuracy/train', self.train_accuracy)
+        
+        self.train_dice(logits, y)
+        self.log('dice/train', self.train_dice)
         
         return loss
     
@@ -715,11 +762,18 @@ class LitUNet(pl.LightningModule):
         mask = y != 0
         logits = self.model(x)
         logits = self(x)
-        logits = torch.permute(logits, (0, 2, 3, 1))  # logits last
-        loss = F.cross_entropy(logits[mask, ...], y[mask] - 1)  # relabelling 0..14 --> 1..15
+        logits = logits[mask, ...]
+        y = y[mask] - 1  # relabelling 1..15 --> 0..14
         
+        loss = F.cross_entropy(logits, y)
         self.log('loss/val', loss)
         
+        self.val_accuracy(logits, y)
+        self.log('accuracy/val', self.val_accuracy)
+        
+        self.val_dice(logits, y)
+        self.log('dice/val', self.val_dice)
+                
         return loss
     
     def configure_optimizers(self):
@@ -729,28 +783,29 @@ class LitUNet(pl.LightningModule):
     
 def train_unet():
     callbacks = [
-        # EarlyStopping(monitor='accuracy/val', mode='max', patience=3),
-        # ModelCheckpoint(monitor='accuracy/val', mode='max', save_last=True)
+        # EarlyStopping(monitor='loss/val', mode='min', patience=5),
+        ModelCheckpoint(monitor='loss/val', mode='min', save_last=False)
     ]
-    model = LitUNet(176, 14, lr=1e-3)
+    model = LitUNet(176, 14, lr=1e-4)
     trainer = pl.Trainer(
-        accelerator='cpu', 
-        max_epochs=20,
+        accelerator='gpu', 
+        max_epochs=5000,
         callbacks=callbacks,
         default_root_dir='unet_results'
     )
     trainer.fit(model, train_dataloaders=cropped_loader_train_aug, val_dataloaders=cropped_loader_val)
 
-    # y_true = torch.cat([y for x, y in cropped_loader_test], 0)
-    # y_pred = torch.cat(trainer.predict(dataloaders=cropped_loader_test), 0)
-    # print(classification_report(y_true, y_pred))
+    y_true = torch.cat([y for x, y in cropped_loader_test], 0)
+    mask = y_true != 0
+    y_true = y_true[mask] - 1
+    y_pred = torch.cat(trainer.predict(dataloaders=cropped_loader_test), 0)
+    y_pred = y_pred[mask]
+    print(classification_report(y_true, y_pred))
     
     return trainer
     
 
 train_unet()
-        
-
-# TODO: Move the mask out of the model?
 
 # %%
+# TODO: Add Confusion Matrices
