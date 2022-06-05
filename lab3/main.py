@@ -13,7 +13,7 @@ import rasterio
 from sklearn.model_selection import train_test_split
 from sklearn.svm import SVC
 from sklearn.ensemble import RandomForestClassifier
-from sklearn.metrics import classification_report
+from sklearn.metrics import ConfusionMatrixDisplay, classification_report, confusion_matrix
 from sklearn.pipeline import make_pipeline
 from sklearn.preprocessing import StandardScaler
 
@@ -26,6 +26,7 @@ from pytorch_lightning.callbacks import EarlyStopping, ModelCheckpoint
 import torchmetrics
 from torchsummary import summary
 import torchvision.transforms.functional as TF 
+from torchvision.models import resnet18
 
 RANDOM_STATE = 42
 
@@ -114,34 +115,77 @@ def make_pixel_dataset(images, label_images):
     y = y - 1
     return x, y
 
-
 # %% Train SVM and RF
 
 def train_traditional():
     x_train, x_test, y_train, y_test = train_test_split(
         *make_pixel_dataset(images, label_images),
-        test_size=0.2, random_state=RANDOM_STATE
+        test_size=0.3, random_state=RANDOM_STATE
     )
     models = [
         make_pipeline(StandardScaler(), SVC(C=1.0, kernel='rbf')),
         RandomForestClassifier(n_estimators=10),
     ]
-
-    for model in models:
+    titles = ['RandomForestClassifier', 'SVM(rbf)']
+    
+    fig, axs = plt.subplots(ncols=len(models), figsize=(9 * len(models), 9))
+    
+    for model, ax, title in zip(models, axs.flat, titles):
         model.fit(x_train, y_train)
         y_pred = model.predict(x_test)
-        print(type(model).__name__)
-        print(classification_report(y_test, y_pred))
-        print()
         
+        print(title)
+        print(classification_report(y_test, y_pred))
+
+        ConfusionMatrixDisplay.from_predictions(
+            y_test, y_pred,
+            display_labels=info['name'][1:],
+        ).plot(xticks_rotation=90, ax=ax, colorbar=False)
+        ax.set_title(title)
+        
+        print('-'*70)
+    
+    axs[1].set_yticks([])
+    
     return models
 
 
 # %% Train an MLP
+def split_dataset(dataset, train_size, test_size=0., seed=None):
+    if not 0 <= train_size + test_size <= 1:
+        raise ValueError('Invalid train/test sizes')
+    n = len(dataset)
+    n_train = int(train_size * n)
+    n_test = int(test_size * n)
+    n_val = n - (n_train + n_test)
+    generator = torch.Generator()
+    if seed is not None:
+        generator.manual_seed(seed)
+    dataset_train, dataset_val, dataset_test = random_split(
+        dataset, [n_train, n_val, n_test], generator)
+    return dataset_train, dataset_val, dataset_test
+
+
+def evaluate_model(trainer, dataset_test):
+    best_model = trainer.model.load_from_checkpoint(trainer.checkpoint_callback.best_model_path)
+    trainer.test(best_model, dataloaders=dataset_test)
+    confusion_matrix = best_model.test_confusion_matrix.compute().cpu().numpy()
+    
+    title = type(best_model).__name__
+    print(title)
+    print(f'Test Accuracy: {best_model.test_accuracy.compute(): .2%}')
+    print(f'Test Dice Loss: {best_model.test_dice.compute(): .4f}')
+    fig, ax = plt.subplots(figsize=(9, 9))
+    ConfusionMatrixDisplay(
+        confusion_matrix=confusion_matrix,
+        display_labels=info['name'][1:],
+    ).plot(xticks_rotation=90, ax=ax, colorbar=False)
+    ax.set_title(title)
+    
 
 class LitMLP(pl.LightningModule):
     
-    def __init__(self, dim_in, dim_out):
+    def __init__(self, dim_in, dim_out, lr=1e-3, weight_decay=0):
         super().__init__()
         self.model = nn.Sequential(
             nn.Linear(dim_in, 128),
@@ -152,8 +196,21 @@ class LitMLP(pl.LightningModule):
             nn.ReLU(),
             nn.Linear(128, dim_out),
         )
+        self.lr = lr
+        self.weight_decay = weight_decay
+        
         self.train_accuracy = torchmetrics.Accuracy()
         self.val_accuracy = torchmetrics.Accuracy()
+        self.test_accuracy = torchmetrics.Accuracy()
+        
+        self.train_dice = torchmetrics.Dice()
+        self.val_dice = torchmetrics.Dice()
+        self.test_dice = torchmetrics.Dice()
+        
+        self.train_confusion_matrix = torchmetrics.ConfusionMatrix(dim_out)
+        self.val_confusion_matrix = torchmetrics.ConfusionMatrix(dim_out)
+        self.test_confusion_matrix = torchmetrics.ConfusionMatrix(dim_out)
+        
         self.save_hyperparameters()
         
     def forward(self, x):
@@ -170,10 +227,15 @@ class LitMLP(pl.LightningModule):
         logits = self(x)
         
         loss = F.cross_entropy(logits, y)
-        self.log('loss/train', loss)
+        self.log('loss/train', loss, on_epoch=True, on_step=False)
         
         self.train_accuracy(logits, y)
-        self.log('accuracy/train', self.train_accuracy)
+        self.log('accuracy/train', self.train_accuracy, on_epoch=True, on_step=False)
+        
+        self.train_dice(logits, y)
+        self.log('dice/train', self.train_dice, on_epoch=True, on_step=False)
+        
+        self.train_confusion_matrix(logits, y)
         
         return loss
     
@@ -182,49 +244,59 @@ class LitMLP(pl.LightningModule):
         logits = self(x)
         
         loss = F.cross_entropy(logits, y)
-        self.log('loss/val', loss)
+        self.log('loss/val', loss, on_epoch=True, on_step=False)
         
         self.val_accuracy(logits, y)
-        self.log('accuracy/val', self.val_accuracy)
+        self.log('accuracy/val', self.val_accuracy, on_epoch=True, on_step=False)
         
-
+        self.val_dice(logits, y)
+        self.log('dice/val', self.val_dice, on_epoch=True, on_step=False)
+        
+        self.val_confusion_matrix(logits, y)
+        
+    def test_step(self, batch,  batch_idx):
+        x, y = batch
+        logits = self(x)
+        self.test_accuracy(logits, y)
+        self.test_dice(logits, y)
+        self.test_confusion_matrix(logits, y)
+        
     def configure_optimizers(self):
-        optimizer = torch.optim.Adam(self.parameters(), lr=1e-3, weight_decay=1e-5)
+        optimizer = torch.optim.Adam(self.parameters(), lr=self.lr, weight_decay=self.weight_decay)
         return optimizer
 
 
+
 def train_mlp(images, label_images):
-    x_train, x_test, y_train, y_test = train_test_split(
-        *make_pixel_dataset(images, label_images),
-        test_size=0.2, random_state=RANDOM_STATE
-    )
-    train_dataset = TensorDataset(torch.Tensor(x_train), torch.LongTensor(y_train))
-    train_loader = DataLoader(train_dataset, batch_size=64, shuffle=True, num_workers=16)
-    test_dataset = TensorDataset(torch.Tensor(x_test), torch.LongTensor(y_test))
-    test_loader = DataLoader(test_dataset, batch_size=64, num_workers=16)
     
-    dim_in = x_train.shape[-1]
-    dim_out = len(np.unique(y_train))
-    mlp = LitMLP(dim_in, dim_out)
+    xs, ys = make_pixel_dataset(images, label_images)
+    xs = torch.tensor(xs, dtype=torch.float32)
+    ys = torch.tensor(ys, dtype=torch.int64)
+    pixel_dataset = TensorDataset(xs, ys)
+    
+    pixel_dataset_train, pixel_dataset_val, pixel_dataset_test = split_dataset(
+        pixel_dataset, train_size=0.7, test_size=0.15, seed=RANDOM_STATE
+    )
+    pixel_loader_train = DataLoader(pixel_dataset_train, batch_size=128, num_workers=4, shuffle=True)
+    pixel_loader_val = DataLoader(pixel_dataset_val, batch_size=128, num_workers=4)
+    pixel_loader_test = DataLoader(pixel_dataset_test, batch_size=128, num_workers=4)
+    
+    mlp = LitMLP(176, 14, lr=1e-3, weight_decay=1e-5)
     
     callbacks = [
-        # EarlyStopping(monitor='val_loss', mode='min', patience=3, min_delta=1e-2),
+        EarlyStopping(monitor='accuracy/val', mode='max', patience=5),
         ModelCheckpoint(monitor='accuracy/val', mode='max', save_last=True),
     ]
     trainer = pl.Trainer(
-        max_epochs=10,
+        max_epochs=50,
         accelerator='gpu',
         callbacks=callbacks,
         default_root_dir='mlp_results'
     )
-    trainer.fit(mlp, train_loader, test_loader)
-
-    y_pred = torch.cat(trainer.predict(mlp, test_loader), 0)
-    print(classification_report(y_test, y_pred))
+    trainer.fit(mlp, pixel_loader_train, pixel_loader_val)
+    evaluate_model(trainer, pixel_loader_test)
     
-    return mlp
-
-
+    
 # %% STEP 3 - TRAIN PATCH WISE
 
 class PatchDataset(Dataset):
@@ -297,21 +369,13 @@ def display_patch(dataset, idx, ax=None, rgb=(23, 11, 7)):
     return ax
 
 # %%
-def split_dataset(dataset, train_size, test_size=0., seed=None):
-    if not 0 <= train_size + test_size <= 1:
-        raise ValueError('Invalid train/test sizes')
-    n = len(dataset)
-    n_train = int(train_size * n)
-    n_test = int(test_size * n)
-    n_val = n - (n_train + n_test)
-    generator = torch.Generator()
-    if seed is not None:
-        generator.manual_seed(seed)
-    dataset_train, dataset_val, dataset_test = random_split(
-        dataset, [n_train, n_val, n_test], generator)
-    return dataset_train, dataset_val, dataset_test
-
-
+# TRANSFORMS WILL GIVE YOU "WORSE" RESULTS IN THIS DATASET!
+# That is because of locallity.
+# If for example there's forest at the top of the (entire) image,
+# and below the forest, it's all urban,
+# then rotating a patch of it will produce an image that doesn't exist in the dataset
+# and it would not help us predict other patches from the Same image.
+# It's all because the train and the test set are very dependent on one another!
 def flip_and_rotate(*tensors):
     # Use this transform only when height == width!
     
@@ -344,7 +408,7 @@ patch_dataset = ConcatDataset([
 ])
 
 patch_dataset_train, patch_dataset_val, patch_dataset_test = split_dataset(
-    patch_dataset, train_size=0.8, test_size=0.1, seed=RANDOM_STATE
+    patch_dataset, train_size=0.7, test_size=0.15, seed=RANDOM_STATE
 )
 patch_dataset_train_aug = AugmentedDataset(patch_dataset_train, flip_and_rotate)
 
@@ -404,8 +468,19 @@ class LitCNN(pl.LightningModule):
         )
         
         self.lr = lr
+        
         self.train_accuracy = torchmetrics.Accuracy()
         self.val_accuracy = torchmetrics.Accuracy()
+        self.test_accuracy = torchmetrics.Accuracy()
+        
+        self.train_dice = torchmetrics.Dice()
+        self.val_dice = torchmetrics.Dice()
+        self.test_dice = torchmetrics.Dice()
+        
+        self.train_confusion_matrix = torchmetrics.ConfusionMatrix(n_classes)
+        self.val_confusion_matrix = torchmetrics.ConfusionMatrix(n_classes)
+        self.test_confusion_matrix = torchmetrics.ConfusionMatrix(n_classes)
+        
         self.save_hyperparameters()
 
     def forward(self, x):
@@ -432,10 +507,15 @@ class LitCNN(pl.LightningModule):
         logits = self(x)
         
         loss = F.cross_entropy(logits, y)
-        self.log('loss/train', loss)
+        self.log('loss/train', loss, on_epoch=True, on_step=False)
 
         self.train_accuracy(logits, y)
-        self.log('accuracy/train', self.train_accuracy)
+        self.log('accuracy/train', self.train_accuracy, on_epoch=True, on_step=False)
+        
+        self.train_dice(logits, y)
+        self.log('dice/train', self.train_dice, on_epoch=True, on_step=False)
+        
+        self.train_confusion_matrix(logits, y)
 
         return loss
     
@@ -444,10 +524,22 @@ class LitCNN(pl.LightningModule):
         logits = self(x)
         
         loss = F.cross_entropy(logits, y)
-        self.log('loss/val', loss)
+        self.log('loss/val', loss, on_epoch=True, on_step=False)
         
         self.val_accuracy(logits, y)
-        self.log('accuracy/val', self.val_accuracy)
+        self.log('accuracy/val', self.val_accuracy, on_epoch=True, on_step=False)
+        
+        self.val_dice(logits, y)
+        self.log('dice/val', self.val_dice, on_epoch=True, on_step=False)
+        
+        self.val_confusion_matrix(logits, y)
+        
+    def test_step(self, batch,  batch_idx):
+        x, y = batch
+        logits = self(x)
+        self.test_accuracy(logits, y)
+        self.test_dice(logits, y)
+        self.test_confusion_matrix(logits, y)
 
     def configure_optimizers(self):
         optimizer = torch.optim.Adam(self.parameters(), lr=self.lr)
@@ -457,40 +549,20 @@ class LitCNN(pl.LightningModule):
 def train_cnn():
     # WARNING! YOU WILL GET GOOD RESULTS BECAUSE THE IMAGES IN TRAIN AND TEST OVERLAP!
     # The labels don't, but because the labels are locally continuous, we have information leakage via the images!
+    cnn = LitCNN(176, 14, lr=1e-3)
     callbacks = [
-        EarlyStopping(monitor='accuracy/val', mode='max', patience=3),
+        EarlyStopping(monitor='accuracy/val', mode='max', patience=5),
         ModelCheckpoint(monitor='accuracy/val', mode='max', save_last=True)
     ]
-    model = LitCNN(176, 14, lr=1e-3)
     trainer = pl.Trainer(
         accelerator='gpu', 
-        max_epochs=20,
+        max_epochs=50,
         callbacks=callbacks,
         default_root_dir='cnn_results'
     )
-    trainer.fit(model, train_dataloaders=patch_loader_train_aug, val_dataloaders=patch_loader_val)
+    trainer.fit(cnn, train_dataloaders=patch_loader_train_aug, val_dataloaders=patch_loader_val)
 
-    y_true = torch.cat([y for x, y in patch_loader_test], 0)
-    y_pred = torch.cat(trainer.predict(dataloaders=patch_loader_test), 0)
-    print(classification_report(y_true, y_pred))
-    
-    return trainer
-
-
-# %%
-rgb_dataset = ConcatDataset([
-    PatchDataset(image, label_image, patch_size, channels=(23, 11, 7))
-    for image, label_image in zip(images, label_images)
-])
-rgb_dataset_train, rgb_dataset_val, rgb_dataset_test = split_dataset(
-    rgb_dataset, train_size=0.8, test_size=0.1, seed=RANDOM_STATE
-)
-rgb_dataset_train_aug = AugmentedDataset(rgb_dataset_train, flip_and_rotate)
-
-rgb_loader_train = DataLoader(rgb_dataset_train, batch_size=64, shuffle=True, num_workers=8)
-rgb_loader_train_aug = DataLoader(rgb_dataset_train_aug, batch_size=64, shuffle=True, num_workers=8)
-rgb_loader_val = DataLoader(rgb_dataset_val, batch_size=64, num_workers=8)
-rgb_loader_test = DataLoader(rgb_dataset_test, batch_size=64, num_workers=8)
+    evaluate_model(trainer, patch_loader_test)
 
 
 # %%
@@ -575,6 +647,8 @@ ds = CroppedDataset(images[1], label_images[1], 64, 64//4)
 # %%
 # Sliding window with stride equal to window size
 # so that no part from the training images exist in the validation images.
+# If overlap is allowed both train and validation accuracy reach ~100%,
+# but without overlap, validation accuracy drops to about 80%!  
 
 cropped_dataset = ConcatDataset([
     CroppedDataset(image, label_image, 62, 62)  # 62*4 = 248 < 249 and 250, the heights of the images
@@ -587,16 +661,15 @@ cropped_dataset = ConcatDataset([
 # cropped_dataset = Subset(cropped_dataset, indices)
 
 cropped_dataset_train, cropped_dataset_val, cropped_dataset_test = split_dataset(
-    cropped_dataset, train_size=0.7, test_size=0.2, seed=RANDOM_STATE
+    cropped_dataset, train_size=0.7, test_size=0.15, seed=RANDOM_STATE
 )
 cropped_dataset_train_aug = AugmentedDataset(
     cropped_dataset_train, transform=flip_and_rotate, apply_on_target=True
 )
-# print(*map(len, (cropped_dataset_train_aug, cropped_dataset_val, cropped_dataset_test)))
-
-cropped_loader_train_aug = DataLoader(cropped_dataset_train_aug, batch_size=16, shuffle=True, num_workers=1)
-cropped_loader_val = DataLoader(cropped_dataset_val, batch_size=16, num_workers=1)
-cropped_loader_test = DataLoader(cropped_dataset_test, batch_size=16, num_workers=1)
+# The local runtime crashes with that crop size and batch size.
+cropped_loader_train_aug = DataLoader(cropped_dataset_train_aug, batch_size=8, shuffle=True, num_workers=1)
+cropped_loader_val = DataLoader(cropped_dataset_val, batch_size=8, num_workers=1)
+cropped_loader_test = DataLoader(cropped_dataset_test, batch_size=8, num_workers=1)
         
 
 # %%
@@ -607,7 +680,7 @@ def display_segmentation(
     rgb=(23, 11, 7), axs=None
 ):
     if axs is None:
-        fig, axs = plt.subplots(ncols=2)
+        fig, axs = plt.subplots(ncols=2, figsize= (10, 10))
         
     img, label = dataset[idx]
     img = img[rgb, ...]
@@ -720,16 +793,25 @@ class LitUNet(pl.LightningModule):
     
     def __init__(self, n_channels, n_classes, lr=1e-4):
         super().__init__()
-        self.model = UNet(n_channels, n_classes)
+        self.unet = UNet(n_channels, n_classes)
         self.lr = lr
-        self.train_dice = torchmetrics.Dice()
-        self.val_dice = torchmetrics.Dice()
+        
         self.train_accuracy = torchmetrics.Accuracy()
         self.val_accuracy = torchmetrics.Accuracy()
+        self.test_accuracy = torchmetrics.Accuracy()
+        
+        self.train_dice = torchmetrics.Dice()
+        self.val_dice = torchmetrics.Dice()
+        self.test_dice = torchmetrics.Dice()
+        
+        self.train_confusion_matrix = torchmetrics.ConfusionMatrix(n_classes)
+        self.val_confusion_matrix = torchmetrics.ConfusionMatrix(n_classes)
+        self.test_confusion_matrix = torchmetrics.ConfusionMatrix(n_classes)
+        
         self.save_hyperparameters()
     
     def forward(self, x):
-        return self.model(x)
+        return self.unet(x)
     
     def predict_step(self, batch, batch_idx):
         x, y = batch
@@ -740,72 +822,94 @@ class LitUNet(pl.LightningModule):
     def training_step(self, batch, batch_idx):
         x, y = batch
         
-        # TODO: Move the mask out of the model?
+        # TODO: Move the mask out of the model and into the dataset?
         mask = y != 0
         logits = self(x)
         logits = logits[mask, ...]
         y = y[mask] - 1  # relabelling 1..15 --> 0..14
         
         loss = F.cross_entropy(logits, y)
-        self.log('loss/train', loss)
+        self.log('loss/train', loss, on_epoch=True, on_step=False)
         
         self.train_accuracy(logits, y)
-        self.log('accuracy/train', self.train_accuracy)
+        self.log('accuracy/train', self.train_accuracy, on_epoch=True, on_step=False)
         
         self.train_dice(logits, y)
-        self.log('dice/train', self.train_dice)
+        self.log('dice/train', self.train_dice, on_epoch=True, on_step=False)
+        
+        self.train_confusion_matrix(logits, y)
         
         return loss
     
     def validation_step(self, batch, batch_idx):
         x, y = batch
         mask = y != 0
-        logits = self.model(x)
+        logits = self.unet(x)
         logits = self(x)
         logits = logits[mask, ...]
         y = y[mask] - 1  # relabelling 1..15 --> 0..14
         
         loss = F.cross_entropy(logits, y)
-        self.log('loss/val', loss)
+        self.log('loss/val', loss, on_epoch=True, on_step=False)
         
         self.val_accuracy(logits, y)
-        self.log('accuracy/val', self.val_accuracy)
+        self.log('accuracy/val', self.val_accuracy, on_epoch=True, on_step=False)
         
         self.val_dice(logits, y)
-        self.log('dice/val', self.val_dice)
+        self.log('dice/val', self.val_dice, on_epoch=True, on_step=False)
+        
+        self.val_confusion_matrix(logits, y)
                 
-        return loss
-    
     def configure_optimizers(self):
         optimizer = torch.optim.Adam(self.parameters(), lr=self.lr)
         return optimizer
     
+    def test_step(self, batch, batch_idx):
+        x, y = batch
+        mask = y != 0
+        logits = self.unet(x)
+        logits = self(x)
+        logits = logits[mask, ...]
+        y = y[mask] - 1  # relabelling 1..15 --> 0..14
+        
+        loss = F.cross_entropy(logits, y)
+        self.test_accuracy(logits, y)
+        self.test_dice(logits, y)
+        self.test_confusion_matrix(logits, y)
+    
     
 def train_unet():
     callbacks = [
-        # EarlyStopping(monitor='loss/val', mode='min', patience=5),
-        ModelCheckpoint(monitor='loss/val', mode='min', save_last=False)
+        EarlyStopping(monitor='accuracy/val', mode='max', patience=5),
+        ModelCheckpoint(monitor='accuracy/val', mode='max', save_last=False)
     ]
     model = LitUNet(176, 14, lr=1e-4)
     trainer = pl.Trainer(
         accelerator='gpu', 
-        max_epochs=5000,
+        max_epochs=50,
         callbacks=callbacks,
         default_root_dir='unet_results'
     )
     trainer.fit(model, train_dataloaders=cropped_loader_train_aug, val_dataloaders=cropped_loader_val)
 
-    y_true = torch.cat([y for x, y in cropped_loader_test], 0)
-    mask = y_true != 0
-    y_true = y_true[mask] - 1
-    y_pred = torch.cat(trainer.predict(dataloaders=cropped_loader_test), 0)
-    y_pred = y_pred[mask]
-    print(classification_report(y_true, y_pred))
+    evaluate_model(trainer, cropped_loader_test)
     
-    return trainer
-    
-
-train_unet()
 
 # %%
-# TODO: Add Confusion Matrices
+
+rgb_dataset = ConcatDataset([
+    PatchDataset(image, label_image, patch_size, channels=(23, 11, 7))
+    for image, label_image in zip(images, label_images)
+])
+rgb_dataset_train, rgb_dataset_val, rgb_dataset_test = split_dataset(
+    rgb_dataset, train_size=0.7, test_size=0.15, seed=RANDOM_STATE
+)
+rgb_dataset_train_aug = AugmentedDataset(rgb_dataset_train, flip_and_rotate)
+
+rgb_loader_train = DataLoader(rgb_dataset_train, batch_size=64, shuffle=True, num_workers=8)
+rgb_loader_train_aug = DataLoader(rgb_dataset_train_aug, batch_size=64, shuffle=True, num_workers=8)
+rgb_loader_val = DataLoader(rgb_dataset_val, batch_size=64, num_workers=8)
+rgb_loader_test = DataLoader(rgb_dataset_test, batch_size=64, num_workers=8)
+
+
+# %%
