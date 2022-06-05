@@ -921,7 +921,8 @@ def train_resnet(loader_train, loader_val, loader_test, names, epochs=50):
 def train_unet(loader_train, loader_val, loader_test, names, epochs):
     model = LitUNet(176, 14, lr=1e-4)
     callbacks = [
-        EarlyStopping(monitor='accuracy/val', mode='max', patience=5),
+        # Too much variance due sample size variability due to label exclusion
+        # EarlyStopping(monitor='accuracy/val', mode='max', patience=5),
         ModelCheckpoint(monitor='accuracy/val', mode='max', save_last=False)
     ]
     trainer = pl.Trainer(
