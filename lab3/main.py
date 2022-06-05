@@ -456,23 +456,24 @@ class UNet(nn.Module):
         b3 = self.up3(b2, a2)
         b4 = self.up4(b3, a1)
         logits = self.exit(b4)
-        logits = torch.permute(logits, (0, 2, 3, 1))  # logits last
         return logits
 
 class LitUNet(pl.LightningModule):
     
-    def __init__(self, n_channels, n_classes, lr=1e-4):
+    def __init__(self, n_channels, n_classes, ignore_index=None, lr=1e-4):
         super().__init__()
         self.unet = UNet(n_channels, n_classes)
         self.lr = lr
         
-        self.train_accuracy = torchmetrics.Accuracy()
-        self.val_accuracy = torchmetrics.Accuracy()
-        self.test_accuracy = torchmetrics.Accuracy()
+        self.cross_entropy = nn.CrossEntropyLoss(ignore_index=ignore_index)
         
-        self.train_dice = torchmetrics.Dice()
-        self.val_dice = torchmetrics.Dice()
-        self.test_dice = torchmetrics.Dice()
+        self.train_accuracy = torchmetrics.Accuracy(ignore_index=ignore_index, mdmc_average='global')
+        self.val_accuracy = torchmetrics.Accuracy(ignore_index=ignore_index, mdmc_average='global')
+        self.test_accuracy = torchmetrics.Accuracy(ignore_index=ignore_index, mdmc_average='global')
+        
+        self.train_dice = torchmetrics.Dice(ignore_index=ignore_index, mdmc_average='global')
+        self.val_dice = torchmetrics.Dice(ignore_index=ignore_index, mdmc_average='global')
+        self.test_dice = torchmetrics.Dice(ignore_index=ignore_index, mdmc_average='global')
         
         self.train_confusion_matrix = torchmetrics.ConfusionMatrix(n_classes)
         self.val_confusion_matrix = torchmetrics.ConfusionMatrix(n_classes)
@@ -486,19 +487,14 @@ class LitUNet(pl.LightningModule):
     def predict_step(self, batch, batch_idx):
         x, y = batch
         logits = self(x)
-        pred = torch.argmax(logits, -1)
+        pred = torch.argmax(logits, 1)
         return pred
     
     def training_step(self, batch, batch_idx):
         x, y = batch
-        
-        # TODO: Move the mask out of the model and into the dataset?
-        mask = y != 0
         logits = self(x)
-        logits = logits[mask, ...]
-        y = y[mask] - 1  # relabelling 1..15 --> 0..14
         
-        loss = F.cross_entropy(logits, y)
+        loss = self.cross_entropy(logits, y)
         self.log('loss/train', loss, on_epoch=True, on_step=False)
         
         self.train_accuracy(logits, y)
@@ -513,13 +509,9 @@ class LitUNet(pl.LightningModule):
     
     def validation_step(self, batch, batch_idx):
         x, y = batch
-        mask = y != 0
-        logits = self.unet(x)
         logits = self(x)
-        logits = logits[mask, ...]
-        y = y[mask] - 1  # relabelling 1..15 --> 0..14
         
-        loss = F.cross_entropy(logits, y)
+        loss = self.cross_entropy(logits, y)
         self.log('loss/val', loss, on_epoch=True, on_step=False)
         
         self.val_accuracy(logits, y)
@@ -536,13 +528,9 @@ class LitUNet(pl.LightningModule):
     
     def test_step(self, batch, batch_idx):
         x, y = batch
-        mask = y != 0
-        logits = self.unet(x)
         logits = self(x)
-        logits = logits[mask, ...]
-        y = y[mask] - 1  # relabelling 1..15 --> 0..14
         
-        loss = F.cross_entropy(logits, y)
+        loss = self.cross_entropy(logits, y)
         self.test_accuracy(logits, y)
         self.test_dice(logits, y)
         self.test_confusion_matrix(logits, y)
@@ -802,13 +790,16 @@ def make_pixel_dataset(images, label_images):
 # MODEL TRAINING FUNCTIONS (Hardcoded)
 ##########################################################
 
-def evaluate_model(trainer, dataset_test, names):
+def evaluate_model(trainer, dataset_test, names, ignore_index=None):
     """Test a model and display the accuracy, the dice loss and the confusion matrix.
     This function assumes a very specific structure of the input.
     """
     best_model = trainer.model.load_from_checkpoint(trainer.checkpoint_callback.best_model_path)
     trainer.test(best_model, dataloaders=dataset_test)
     confusion_matrix = best_model.test_confusion_matrix.compute().cpu().numpy()
+    if ignore_index is not None:
+        confusion_matrix = np.delete(confusion_matrix, ignore_index, 0)
+        confusion_matrix = np.delete(confusion_matrix, ignore_index, 1)
     
     title = type(best_model).__name__
     print(title)
@@ -919,11 +910,11 @@ def train_resnet(loader_train, loader_val, loader_test, names, epochs=50):
      
     
 def train_unet(loader_train, loader_val, loader_test, names, epochs):
-    model = LitUNet(176, 14, lr=1e-4)
+    model = LitUNet(176, 15, ignore_index=0, lr=1e-4)
     callbacks = [
         # Too much variance due sample size variability due to label exclusion
-        # EarlyStopping(monitor='accuracy/val', mode='max', patience=5),
-        ModelCheckpoint(monitor='accuracy/val', mode='max', save_last=False)
+        # EarlyStopping(monitor='accuracy/val', mode='max', patience=20),
+        ModelCheckpoint(monitor='accuracy/val', mode='max', save_last=False),
     ]
     trainer = pl.Trainer(
         accelerator='gpu', 
@@ -933,7 +924,7 @@ def train_unet(loader_train, loader_val, loader_test, names, epochs):
     )
     trainer.fit(model, train_dataloaders=loader_train, val_dataloaders=loader_val)
 
-    evaluate_model(trainer, loader_test, names)
+    evaluate_model(trainer, loader_test, names, ignore_index=0)
     
 
 # if __name__ == '__main__':
@@ -1015,10 +1006,10 @@ cropped_dataset_train_aug = AugmentedDataset(
     cropped_dataset_train, transform=flip_and_rotate, apply_on_target=True
 )
 
-# The local runtime crashes with that crop size and batch size.
-cropped_loader_train_aug = DataLoader(cropped_dataset_train_aug, batch_size=2, shuffle=True, num_workers=0)
-cropped_loader_val = DataLoader(cropped_dataset_val, batch_size=2, num_workers=0)
-cropped_loader_test = DataLoader(cropped_dataset_test, batch_size=2, num_workers=0)
+# Usebatch_size=2 when running locally
+cropped_loader_train_aug = DataLoader(cropped_dataset_train_aug, batch_size=16, shuffle=True, num_workers=0)
+cropped_loader_val = DataLoader(cropped_dataset_val, batch_size=16, num_workers=0)
+cropped_loader_test = DataLoader(cropped_dataset_test, batch_size=16, num_workers=0)
 
 display_segmentation(cropped_dataset_train_aug, 80, cmap=cmap, names=names, rgb=rgb, n_repeats=5)
 
@@ -1026,13 +1017,13 @@ display_segmentation(cropped_dataset_train_aug, 80, cmap=cmap, names=names, rgb=
 print('Training Random Forest and SVM...')
 train_traditional(images, label_images, names=names[1:], random_state=random_state)
 print('Training MLP...')
-train_mlp(images, label_images, names=names[1:], random_state=random_state, epochs=100)
+train_mlp(images, label_images, names=names[1:], random_state=random_state, epochs=500)
 print('Training CNN...')
-train_cnn(patch_loader_train_aug, patch_loader_val, patch_loader_test, names=names[1:], epochs=100)
+train_cnn(patch_loader_train_aug, patch_loader_val, patch_loader_test, names=names[1:], epochs=500)
 print('Training ResNet...')
-train_resnet(rgb_loader_train_aug, rgb_loader_val, rgb_loader_test, names=names[1:], epochs=100)
+train_resnet(rgb_loader_train_aug, rgb_loader_val, rgb_loader_test, names=names[1:], epochs=500)
 print('Training U-Net...')
-train_unet(cropped_loader_train_aug, cropped_loader_val, cropped_loader_test, names=names[1:], epochs=100)
+train_unet(cropped_loader_train_aug, cropped_loader_val, cropped_loader_test, names=names[1:], epochs=500)
 print('Finished!')
 
 
