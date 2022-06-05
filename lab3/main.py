@@ -376,29 +376,30 @@ def display_patch(dataset, idx, ax=None, rgb=(23, 11, 7)):
 # then rotating a patch of it will produce an image that doesn't exist in the dataset
 # and it would not help us predict other patches from the Same image.
 # It's all because the train and the test set are very dependent on one another!
-def flip_and_rotate(*tensors):
+def flip_and_rotate(x, y=None):
     # Use this transform only when height == width!
     
-    tensors = list(tensors)
-    # Expand 2 dimensional tensors so that the transforms work
-    expanded = []
-    for i in range(len(tensors)):
-        if tensors[i].ndim == 2:
-            tensors[i] = torch.unsqueeze(tensors[i], 0)
-            expanded.append(i)
-    
+    # Expand y so that it has at least 3 dims, so that TF accepts it
+    if y is not None:
+        y = torch.unsqueeze(y, 0)
+        
     # Flip vertically
     if random.random() > 0.5:
-        tensors = [TF.vflip(t) for t in tensors]
+        x = TF.vflip(x)
+        if y is not None:
+            y = TF.vflip(y)
+    
     # Rotate by 0, 1, 2, or 3 right angles 
     if (k := random.randint(0, 4)) != 0:
-        tensors = [TF.rotate(t, k * 90) for t in tensors]
+        x = TF.rotate(x, k * 90)
+        if y is not None:
+            y = TF.rotate(y, k * 90)
     
     # Undo the expansion
-    for idx in expanded:
-        tensors[idx] = torch.squeeze(tensors[idx], 0)
-
-    return tuple(tensors) if len(tensors) > 1 else tensors[0]
+    if y is not None:
+        y = torch.squeeze(y, 0)
+        
+    return x, y if y is not None else x
 
 
 patch_size = 15
@@ -906,10 +907,123 @@ rgb_dataset_train, rgb_dataset_val, rgb_dataset_test = split_dataset(
 )
 rgb_dataset_train_aug = AugmentedDataset(rgb_dataset_train, flip_and_rotate)
 
-rgb_loader_train = DataLoader(rgb_dataset_train, batch_size=64, shuffle=True, num_workers=8)
-rgb_loader_train_aug = DataLoader(rgb_dataset_train_aug, batch_size=64, shuffle=True, num_workers=8)
-rgb_loader_val = DataLoader(rgb_dataset_val, batch_size=64, num_workers=8)
-rgb_loader_test = DataLoader(rgb_dataset_test, batch_size=64, num_workers=8)
+rgb_loader_train = DataLoader(rgb_dataset_train, batch_size=128, shuffle=True, num_workers=8)
+rgb_loader_train_aug = DataLoader(rgb_dataset_train_aug, batch_size=128, shuffle=True, num_workers=8)
+rgb_loader_val = DataLoader(rgb_dataset_val, batch_size=128, num_workers=8)
+rgb_loader_test = DataLoader(rgb_dataset_test, batch_size=128, num_workers=8)
 
+
+# %%
+class TransferResNet(pl.LightningModule):
+    def __init__(self, n_classes, freeze_head=False, lr=1e-3):
+        super().__init__()
+        
+        self.model = resnet18(pretrained=True)
+        self.freeze_head = freeze_head
+        if self.freeze_head:
+            for param in self.model.parameters():
+                param.requires_grad = False
+                
+        self.model.fc = nn.Linear(512, n_classes)
+
+        self.lr = lr
+
+        self.train_accuracy = torchmetrics.Accuracy()
+        self.val_accuracy = torchmetrics.Accuracy()
+        self.test_accuracy = torchmetrics.Accuracy()
+        
+        self.train_dice = torchmetrics.Dice()
+        self.val_dice = torchmetrics.Dice()
+        self.test_dice = torchmetrics.Dice()
+        
+        self.train_confusion_matrix = torchmetrics.ConfusionMatrix(n_classes)
+        self.val_confusion_matrix = torchmetrics.ConfusionMatrix(n_classes)
+        self.test_confusion_matrix = torchmetrics.ConfusionMatrix(n_classes)
+        
+        self.save_hyperparameters()
+
+    def forward(self, x):
+        return self.model(x)
+    
+    def predict_step(self, batch, batch_idx):
+        x, y = batch
+        logits = self(x)
+        pred = torch.argmax(logits, -1)
+        return pred 
+    
+    def training_step(self, batch,  batch_idx, optimizer_idx):
+        x, y = batch
+        logits = self(x)
+        
+        loss = F.cross_entropy(logits, y)
+        self.log('loss/train', loss, on_epoch=True, on_step=False)
+        
+        self.train_accuracy(logits, y)
+        self.log('accuracy/train', self.train_accuracy, on_epoch=True, on_step=False)
+        
+        self.train_dice(logits, y)
+        self.log('dice/train', self.train_dice, on_epoch=True, on_step=False)
+        
+        self.train_confusion_matrix(logits, y)
+        
+        return loss
+    
+    def validation_step(self, batch,  batch_idx):
+        x, y = batch
+        logits = self(x)
+        
+        loss = F.cross_entropy(logits, y)
+        self.log('loss/val', loss, on_epoch=True, on_step=False)
+        
+        self.val_accuracy(logits, y)
+        self.log('accuracy/val', self.val_accuracy, on_epoch=True, on_step=False)
+        
+        self.val_dice(logits, y)
+        self.log('dice/val', self.val_dice, on_epoch=True, on_step=False)
+        
+        self.val_confusion_matrix(logits, y)
+        
+    def test_step(self, batch,  batch_idx):
+        x, y = batch
+        logits = self(x)
+        self.test_accuracy(logits, y)
+        self.test_dice(logits, y)
+        self.test_confusion_matrix(logits, y)
+
+    def configure_optimizers(self):
+        children = list(self.model.children())
+        
+        tail_params = children[-1].parameters()
+        tail_optim = torch.optim.Adam(tail_params, lr=self.lr)
+        
+        if self.freeze_head:
+            return tail_optim
+        else:
+            head_params = itertools.chain.from_iterable(
+                child.parameters() for child in children[:-1]
+            )
+            head_optim = torch.optim.Adam(head_params, lr=self.lr / 200)
+            return head_optim, tail_optim
+    
+    
+def train_resnet():
+    
+    resnet = TransferResNet(14, freeze_head=False, lr=1e-4)
+    
+    callbacks = [
+        EarlyStopping(monitor='accuracy/val', mode='max', patience=5),
+        ModelCheckpoint(monitor='accuracy/val', mode='max', save_last=True),
+    ]
+    trainer = pl.Trainer(
+        max_epochs=50,
+        accelerator='gpu',
+        callbacks=callbacks,
+        default_root_dir='resnet_results'
+    )
+    trainer.fit(resnet, rgb_loader_train, rgb_loader_val)
+    evaluate_model(trainer, rgb_loader_test)
+
+
+train_resnet()
 
 # %%
