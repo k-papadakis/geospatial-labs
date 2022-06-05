@@ -465,6 +465,8 @@ class LitUNet(pl.LightningModule):
         self.unet = UNet(n_channels, n_classes)
         self.lr = lr
         
+        # TODO: Dice loss is consistently about 1/10 lower than in the other models. Bug?
+        
         self.cross_entropy = nn.CrossEntropyLoss(ignore_index=ignore_index)
         
         self.train_accuracy = torchmetrics.Accuracy(ignore_index=ignore_index, mdmc_average='global')
@@ -1053,4 +1055,4 @@ print('Finished!')
 # Element wise models also perform really well because of local image "continuity".
 
 # Of all the models, only the segmentation model with no overlap
-# is the one that it test somewhat realistically. 
+# is the one that it test somewhat realistically.
