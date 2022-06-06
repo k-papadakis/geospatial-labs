@@ -636,31 +636,29 @@ class TransferResNet(pl.LightningModule):
 # PYTORCH TRANSFORMS
 ##########################################################
 
-
-def flip_and_rotate(x, y=None):
+def flip_and_rotate(*tensors):
     # Use this transform only when height == width!
     
-    # Expand y so that it has at least 3 dims, so that TF accepts it
-    if y is not None:
-        y = torch.unsqueeze(y, 0)
-        
+    tensors = list(tensors)
+    # Expand 2 dimensional tensors so that the transforms work
+    expanded = []
+    for i in range(len(tensors)):
+        if tensors[i].ndim == 2:
+            tensors[i] = torch.unsqueeze(tensors[i], 0)
+            expanded.append(i)
+    
     # Flip vertically
     if random.random() > 0.5:
-        x = TF.vflip(x)
-        if y is not None:
-            y = TF.vflip(y)
-    
+        tensors = [TF.vflip(t) for t in tensors]
     # Rotate by 0, 1, 2, or 3 right angles 
     if (k := random.randint(0, 4)) != 0:
-        x = TF.rotate(x, k * 90)
-        if y is not None:
-            y = TF.rotate(y, k * 90)
+        tensors = [TF.rotate(t, k * 90) for t in tensors]
     
     # Undo the expansion
-    if y is not None:
-        y = torch.squeeze(y, 0)
-        
-    return (x, y) if y is not None else x
+    for idx in expanded:
+        tensors[idx] = torch.squeeze(tensors[idx], 0)
+
+    return tuple(tensors) if len(tensors) > 1 else tensors[0]
 
 
 ##########################################################
