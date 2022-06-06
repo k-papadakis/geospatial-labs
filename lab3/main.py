@@ -578,7 +578,7 @@ class TransferResNet(pl.LightningModule):
         pred = torch.argmax(logits, -1)
         return pred 
     
-    def training_step(self, batch,  batch_idx, optimizer_idx):
+    def training_step(self, batch,  batch_idx, optimizer_idx=None):
         x, y = batch
         logits = self(x)
         
@@ -897,8 +897,8 @@ def train_cnn(loader_train, loader_val, loader_test, names, epochs=50):
     evaluate_model(trainer, loader_test, names)
 
 
-def train_resnet(loader_train, loader_val, loader_test, names, epochs=50):
-    resnet = TransferResNet(14, freeze_head=False, lr=1e-4)
+def train_resnet(loader_train, loader_val, loader_test, names, freeze_head=False, epochs=50):
+    resnet = TransferResNet(14, freeze_head=freeze_head, lr=1e-4)
     
     callbacks = [
         EarlyStopping(monitor='accuracy/val', mode='max', patience=5),
@@ -1026,7 +1026,7 @@ train_mlp(images, label_images, names=names[1:], random_state=random_state, epoc
 print('Training CNN...')
 train_cnn(patch_loader_train_aug, patch_loader_val, patch_loader_test, names=names[1:], epochs=500)
 print('Training ResNet...')
-train_resnet(rgb_loader_train_aug, rgb_loader_val, rgb_loader_test, names=names[1:], epochs=500)
+train_resnet(rgb_loader_train_aug, rgb_loader_val, rgb_loader_test, names=names[1:], freeze_head=False, epochs=500)
 print('Training U-Net...')
 train_unet(cropped_loader_train_aug, cropped_loader_val, cropped_loader_test, names=names, epochs=500)
 print('Finished!')
