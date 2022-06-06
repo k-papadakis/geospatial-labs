@@ -1,5 +1,6 @@
 # %%
 from typing import Dict, List, Optional, Union, Tuple
+import warnings
 import itertools
 import random
 import csv
@@ -798,8 +799,12 @@ def evaluate_model(trainer, dataset_test, names, ignore_index=None):
     trainer.test(best_model, dataloaders=dataset_test)
     confusion_matrix = best_model.test_confusion_matrix.compute().cpu().numpy()
     if ignore_index is not None:
-        confusion_matrix = np.delete(confusion_matrix, ignore_index, 0)
-        confusion_matrix = np.delete(confusion_matrix, ignore_index, 1)
+        if np.any(confusion_matrix[:, ignore_index]):
+            warnings.warn('`confusion_matrix` has predictions with label `ignore_index`')
+        else:
+            del names[ignore_index]
+            confusion_matrix = np.delete(confusion_matrix, ignore_index, 0)
+            confusion_matrix = np.delete(confusion_matrix, ignore_index, 1)
     
     title = type(best_model).__name__
     print(title)
@@ -1006,7 +1011,7 @@ cropped_dataset_train_aug = AugmentedDataset(
     cropped_dataset_train, transform=flip_and_rotate, apply_on_target=True
 )
 
-# Usebatch_size=2 when running locally
+# Use batch_size=2 when running locally
 cropped_loader_train_aug = DataLoader(cropped_dataset_train_aug, batch_size=16, shuffle=True, num_workers=0)
 cropped_loader_val = DataLoader(cropped_dataset_val, batch_size=16, num_workers=0)
 cropped_loader_test = DataLoader(cropped_dataset_test, batch_size=16, num_workers=0)
@@ -1023,7 +1028,7 @@ train_cnn(patch_loader_train_aug, patch_loader_val, patch_loader_test, names=nam
 print('Training ResNet...')
 train_resnet(rgb_loader_train_aug, rgb_loader_val, rgb_loader_test, names=names[1:], epochs=500)
 print('Training U-Net...')
-train_unet(cropped_loader_train_aug, cropped_loader_val, cropped_loader_test, names=names[1:], epochs=500)
+train_unet(cropped_loader_train_aug, cropped_loader_val, cropped_loader_test, names=names, epochs=500)
 print('Finished!')
 
 
