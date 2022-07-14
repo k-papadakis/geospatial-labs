@@ -118,16 +118,20 @@ class CroppedDataset(Dataset):
     
     def __getitem__(self, idx):
         min_i, min_j, max_i, max_j = self.get_bounds(idx)
+        
         x = self.image[self.channels, min_i : max_i, min_j : max_j]
-        y = self.labels[min_i : max_i, min_j : max_j]
-        
         x = torch.tensor(x, dtype=torch.float32)
-        y = torch.tensor(y, dtype=torch.int64)
         
-        if self.transform:
+        if self.labels is not None:
+          y = self.labels[min_i : max_i, min_j : max_j]
+          y = torch.tensor(y, dtype=torch.int64)
+          if self.transform:
             x, y = self.transform(x, y)
-         
-        return x, y
+          return x, y
+        else:
+          if self.transform:
+            x = self.transform(x)
+          return x
 
     def get_bounds(self, idx):
         r, c = divmod(idx, self.n_cols)
