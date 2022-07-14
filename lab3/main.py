@@ -952,6 +952,38 @@ def train_unet(loader_train, loader_val, loader_test, names, epochs):
     evaluate_model(trainer, loader_test, names, ignore_index=0)
 
 
+def train_unet_overlap(crop_size, stride, images, label_images):
+    dataset = ConcatDataset([
+        CroppedDataset(image, label_image, stride=stride, crop_size=crop_size)
+        for image, label_image in zip(images, label_images)
+    ])
+
+    # Print max bounds and number of images
+    for ds in dataset.datasets:
+        print(ds.img_h, ds.img_w, ds.get_bounds(len(ds) - 1)[-2:])
+        print(len(ds))
+
+    dataset = AugmentedDataset(
+        dataset, transform=flip_and_rotate, apply_on_target=True
+    )
+
+    loader = DataLoader(dataset, batch_size=16, shuffle=True)
+
+    model = LitUNet(176, 15, ignore_index=0, lr=1e-4)
+    callbacks = [
+        ModelCheckpoint(monitor='loss/train', mode='min', save_last=False),
+    ]
+    trainer = pl.Trainer(
+        accelerator='gpu',
+        max_epochs=500,
+        callbacks=callbacks,
+        default_root_dir='unet_results_overlap'
+    )
+    trainer.fit(model, train_dataloaders=loader)
+    
+    return trainer
+
+    
 ##########################################################
 # IMAGE PREDICTION FUNCTIONS
 ##########################################################
@@ -974,7 +1006,6 @@ def predict_image(src_path, dst_path, size, model):
         for idx, x in enumerate(loader):
             logits = model(x)
             preds = torch.argmax(logits, 1)
-            # preds = torch.squeeze(preds, 0)
             preds = preds.numpy().astype(rasterio.uint8)
             min_i, min_j, max_i, max_j = dataset.get_bounds(idx)
             window = rasterio.windows.Window.from_slices(
@@ -1102,6 +1133,14 @@ cropped_dataset_train_aug = AugmentedDataset(
 # print('Training U-Net...')
 # train_unet(cropped_loader_train_aug, cropped_loader_val, cropped_loader_test, names=names, epochs=500)
 # print('Finished!')
+
+
+# %%
+# Train U-Net with overlap on the entire dataset
+# to use it for the final estimation.
+train_unet_overlap(
+    crop_size=62, stride=15, images=images, label_images=label_images
+)
 
 # %%
 # Evaluate on the unlabelled dataset
