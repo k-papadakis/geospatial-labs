@@ -86,7 +86,8 @@ class CroppedDataset(Dataset):
         super().__init__()
         
         self.image = image
-        self.labels = label_image
+        self.img_h = self.image.shape[-2]
+        self.img_w = self.image.shape[-1]
         
         if isinstance(crop_size, int):
             self.crop_h, self.crop_w = crop_size, crop_size
@@ -105,7 +106,11 @@ class CroppedDataset(Dataset):
         else:
             raise ValueError('Invalid stride.')
         
-        self.channels = channels
+        self.n_rows = 1 + (self.img_h - self.crop_h)//self.stride_h
+        self.n_cols = 1 + (self.img_w - self.crop_w)//self.stride_w
+        self.labels = label_image
+        
+        self.channels = channels if channels is not None else slice(None)
         self.transform = transform
         
     def __len__(self):
@@ -113,8 +118,7 @@ class CroppedDataset(Dataset):
     
     def __getitem__(self, idx):
         min_i, min_j, max_i, max_j = self.get_bounds(idx)
-        channels = self.channels if self.channels is not None else slice(None)
-        x = self.image[channels, min_i : max_i, min_j : max_j]
+        x = self.image[self.channels, min_i : max_i, min_j : max_j]
         y = self.labels[min_i : max_i, min_j : max_j]
         
         x = torch.tensor(x, dtype=torch.float32)
@@ -130,22 +134,6 @@ class CroppedDataset(Dataset):
         min_i, min_j = r * self.stride_h, c * self.stride_w
         max_i, max_j = min_i + self.crop_h, min_j + self.crop_w
         return min_i, min_j, max_i, max_j
-        
-    @property
-    def img_h(self):
-        return self.image.shape[-2]
-    
-    @property
-    def img_w(self):
-        return self.image.shape[-1]
-    
-    @property
-    def n_rows(self):
-        return 1 + (self.img_h - self.crop_h)//self.stride_h
-        
-    @property
-    def n_cols(self):
-        return 1 + (self.img_w - self.crop_w)//self.stride_w
 
 
 class AugmentedDataset(Dataset):

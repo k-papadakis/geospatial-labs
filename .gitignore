@@ -1,3 +1,5 @@
 env
 *.tif
 lightning_logs
+data/
+.vscode
