@@ -969,7 +969,7 @@ def predict_image(src_path, dst_path, size, model):
         height=dataset.img_h,
         count=1,
         dtype=rasterio.uint8,
-        driver='GTiff',
+        driver='Gtif',
     ) as dst:
         for idx, x in enumerate(loader):
             logits = model(x)
@@ -988,7 +988,7 @@ def predict_all_images(
     cmap, names, rgb
 ):
     for src_path, size in zip(validation_x_paths, sizes):
-        tiff_dst_path = src_path.rsplit('.', 1)[0] + '_pred.tiff'
+        tiff_dst_path = src_path.rsplit('.', 1)[0] + '_pred.tif'
         png_dst_path = src_path.rsplit('.', 1)[0] + '_pred.png'
         
         predict_image(src_path, tiff_dst_path, size, model)
@@ -1069,17 +1069,19 @@ cmap=mpl.colors.ListedColormap(info['color'])
 
 
 # # Cropped Dataset
-# stride = crop_size = 62
-# cropped_dataset = ConcatDataset([
-#     CroppedDataset(image, label_image, stride, crop_size)  # 62*4 = 248 < 249 and 250, the heights of the images
-#     for image, label_image in zip(images, label_images)
-# ])
-# cropped_dataset_train, cropped_dataset_val, cropped_dataset_test = split_dataset(
-#     cropped_dataset, train_size=0.7, test_size=0.15, seed=random_state
-# )
-# cropped_dataset_train_aug = AugmentedDataset(
-#     cropped_dataset_train, transform=flip_and_rotate, apply_on_target=True
-# )
+# 62*4 = 248 < 249 and 250, the heights of the images
+stride = 62
+crop_size = 62
+cropped_dataset = ConcatDataset([
+    CroppedDataset(image, label_image, crop_size=crop_size, stride=stride)  
+    for image, label_image in zip(images, label_images)
+])
+cropped_dataset_train, cropped_dataset_val, cropped_dataset_test = split_dataset(
+    cropped_dataset, train_size=0.7, test_size=0.15, seed=random_state
+)
+cropped_dataset_train_aug = AugmentedDataset(
+    cropped_dataset_train, transform=flip_and_rotate, apply_on_target=True
+)
 
 # # Use batch_size=2 when running locally
 # cropped_loader_train_aug = DataLoader(cropped_dataset_train_aug, batch_size=16, shuffle=True, num_workers=0)
