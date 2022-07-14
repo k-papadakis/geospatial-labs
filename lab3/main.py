@@ -1,6 +1,7 @@
 # %%
 from typing import Dict, List, Optional, Union, Tuple
 import warnings
+from pathlib import Path
 import itertools
 import random
 import csv
@@ -705,27 +706,55 @@ def display_segmentation(dataset, idx, cmap, names, rgb, n_repeats=1, axs=None):
     cbar.set_ticks(0.5 + np.arange(cmap.N))
     cbar.set_ticklabels(names)
     
-    return fig, axgrid
+    return axgrid
 
+
+def display_predictions(image, pred_label, cmap, names, rgb, axs=None):
+    if axs is None:
+        fig, axs = plt.subplots(nrows=2, figsize=(16, 6))
+    image = image[rgb, ...].transpose(1, 2, 0)
+    image = image / image.max()
+    axs[0].imshow(image)
+    axs[1].imshow(pred_label, cmap=cmap)
+    axs[0].set_axis_off()
+    axs[1].set_axis_off()
+    
+    norm = mpl.colors.Normalize(0, cmap.N)
+    cbar = plt.gcf().colorbar(
+        mpl.cm.ScalarMappable(norm=norm, cmap=cmap),
+        ax=axs, shrink=0.9, location='right'
+    )
+    cbar.set_ticks(0.5 + np.arange(cmap.N))
+    cbar.set_ticklabels(names)
+    
+    return axs
 
 ##########################################################
 # UTILITY FUNCTIONS
 ##########################################################
 
+def load_image(src_path):
+    with rasterio.open(src_path) as src:
+            image = src.read()
+    # Map integers to floats in [0, 1]    
+    max_val = np.iinfo(image.dtype).max
+    image = image / max_val
+    return image
+
+
+def load_label(src_path):
+    with rasterio.open(src_path) as src:
+        label = src.read(1)
+    return label
+    
+    
 def read_data(image_paths, label_paths):
     """Loads the images and labels in two separate lists."""
     images = []
     labels = []
     for x_path, y_path in zip(image_paths, label_paths):
-        with rasterio.open(y_path) as y_src:
-            y_img = y_src.read(1)
-            
-        with rasterio.open(x_path) as x_src:
-            x_img = x_src.read()
-        # Map integers to floats in [0, 1]
-        max_val = np.iinfo(x_img.dtype).max
-        x_img = x_img / max_val
-        
+        x_img = load_image(x_path)
+        y_img = load_label(y_path)
         images.append(x_img)
         labels.append(y_img)
         
@@ -736,10 +765,9 @@ def read_info(path) -> Dict[str, List]:
     """Read class colors and names"""
     with open(path) as f:
         reader = csv.DictReader(f)
-        names = reader.fieldnames[1:]
-        info = {field: [] for field in names}
+        info = {field: [] for field in reader.fieldnames}
         for record in reader:
-            for name in names:
+            for name in reader.fieldnames:
                 info[name].append(record[name])
     return info
 
@@ -922,8 +950,57 @@ def train_unet(loader_train, loader_val, loader_test, names, epochs):
     trainer.fit(model, train_dataloaders=loader_train, val_dataloaders=loader_val)
 
     evaluate_model(trainer, loader_test, names, ignore_index=0)
-    
 
+
+##########################################################
+# IMAGE PREDICTION FUNCTIONS
+##########################################################
+
+def predict_image(src_path, dst_path, size, model):
+    # Load from disk
+    image = load_image(src_path)
+    dataset = CroppedDataset(image, None, size, size)
+    loader = DataLoader(dataset)
+    
+    # Write to disk
+    with rasterio.open(
+        dst_path, 'w',
+        width=dataset.img_w,
+        height=dataset.img_h,
+        count=1,
+        dtype=rasterio.uint8,
+        driver='GTiff',
+    ) as dst:
+        for idx, x in enumerate(loader):
+            logits = model(x)
+            preds = torch.argmax(logits, 1)
+            # preds = torch.squeeze(preds, 0)
+            preds = preds.numpy().astype(rasterio.uint8)
+            min_i, min_j, max_i, max_j = dataset.get_bounds(idx)
+            window = rasterio.windows.Window.from_slices(
+                (min_i, max_i), (min_j, max_j)
+            )
+            dst.write(preds, window=window)
+
+
+def predict_all_images(
+    validation_x_paths, sizes, model,
+    cmap, names, rgb
+):
+    for src_path, size in zip(validation_x_paths, sizes):
+        tiff_dst_path = src_path.rsplit('.', 1)[0] + '_pred.tiff'
+        png_dst_path = src_path.rsplit('.', 1)[0] + '_pred.png'
+        
+        predict_image(src_path, tiff_dst_path, size, model)
+        
+        image = load_image(src_path)
+        label = load_label(tiff_dst_path)
+        display_predictions(image, label, cmap, names, rgb)
+        
+        plt.savefig(png_dst_path)
+        
+
+# %%
 # if __name__ == '__main__':
 random_state=42
 rgb=(23, 11, 7)
@@ -942,6 +1019,7 @@ validation_x_paths = (
     'HyRANK_satellite/ValidationSet/Nefeli.tif',
 )
 
+# %%
 # LOAD THE IMAGES AND THEIR INFO
 images, label_images = read_data(train_x_paths, train_y_paths)
 info = read_info(info_path)
@@ -950,80 +1028,90 @@ colors=info['color']
 cmap=mpl.colors.ListedColormap(info['color'])
 
 
-# CREATE DATASETS AND DATALOADERS
+# # CREATE DATASETS AND DATALOADERS
 
-# Patch Dataset All Channels
-patch_size = 15
-patch_dataset = ConcatDataset([
-    PatchDataset(image, label_image, patch_size)
-    for image, label_image in zip(images, label_images)
-])
-patch_dataset_train, patch_dataset_val, patch_dataset_test = split_dataset(
-    patch_dataset, train_size=0.7, test_size=0.15, seed=random_state
-)
-patch_dataset_train_aug = AugmentedDataset(patch_dataset_train, flip_and_rotate)
+# # Patch Dataset All Channels
+# patch_size = 15
+# patch_dataset = ConcatDataset([
+#     PatchDataset(image, label_image, patch_size)
+#     for image, label_image in zip(images, label_images)
+# ])
+# patch_dataset_train, patch_dataset_val, patch_dataset_test = split_dataset(
+#     patch_dataset, train_size=0.7, test_size=0.15, seed=random_state
+# )
+# patch_dataset_train_aug = AugmentedDataset(patch_dataset_train, flip_and_rotate)
 
-patch_loader_train = DataLoader(patch_dataset_train, batch_size=64, shuffle=True, num_workers=8)
-patch_loader_train_aug = DataLoader(patch_dataset_train_aug, batch_size=64, shuffle=True, num_workers=8)
-patch_loader_val = DataLoader(patch_dataset_val, batch_size=64, num_workers=8)
-patch_loader_test = DataLoader(patch_dataset_test, batch_size=64, num_workers=8)
+# patch_loader_train = DataLoader(patch_dataset_train, batch_size=64, shuffle=True, num_workers=8)
+# patch_loader_train_aug = DataLoader(patch_dataset_train_aug, batch_size=64, shuffle=True, num_workers=8)
+# patch_loader_val = DataLoader(patch_dataset_val, batch_size=64, num_workers=8)
+# patch_loader_test = DataLoader(patch_dataset_test, batch_size=64, num_workers=8)
 
-fig, axs = plt.subplots(nrows=5, figsize=(4, 5))
-for ax in axs.flat:
-    display_patch(patch_dataset_train_aug, 200, rgb=rgb, ax=ax)
-    ax.set_axis_off()
+# fig, axs = plt.subplots(nrows=5, figsize=(4, 5))
+# for ax in axs.flat:
+#     display_patch(patch_dataset_train_aug, 200, rgb=rgb, ax=ax)
+#     ax.set_axis_off()
     
 
-# Patch Dataset RGB Only   
-rgb_dataset = ConcatDataset([
-    PatchDataset(image, label_image, patch_size, channels=rgb)
-    for image, label_image in zip(images, label_images)
-])
-rgb_dataset_train, rgb_dataset_val, rgb_dataset_test = split_dataset(
-    rgb_dataset, train_size=0.7, test_size=0.15, seed=random_state
-)
-rgb_dataset_train_aug = AugmentedDataset(rgb_dataset_train, flip_and_rotate)
+# # Patch Dataset RGB Only   
+# rgb_dataset = ConcatDataset([
+#     PatchDataset(image, label_image, patch_size, channels=rgb)
+#     for image, label_image in zip(images, label_images)
+# ])
+# rgb_dataset_train, rgb_dataset_val, rgb_dataset_test = split_dataset(
+#     rgb_dataset, train_size=0.7, test_size=0.15, seed=random_state
+# )
+# rgb_dataset_train_aug = AugmentedDataset(rgb_dataset_train, flip_and_rotate)
 
-rgb_loader_train = DataLoader(rgb_dataset_train, batch_size=128, shuffle=True, num_workers=8)
-rgb_loader_train_aug = DataLoader(rgb_dataset_train_aug, batch_size=128, shuffle=True, num_workers=8)
-rgb_loader_val = DataLoader(rgb_dataset_val, batch_size=128, num_workers=8)
-rgb_loader_test = DataLoader(rgb_dataset_test, batch_size=128, num_workers=8)
+# rgb_loader_train = DataLoader(rgb_dataset_train, batch_size=128, shuffle=True, num_workers=8)
+# rgb_loader_train_aug = DataLoader(rgb_dataset_train_aug, batch_size=128, shuffle=True, num_workers=8)
+# rgb_loader_val = DataLoader(rgb_dataset_val, batch_size=128, num_workers=8)
+# rgb_loader_test = DataLoader(rgb_dataset_test, batch_size=128, num_workers=8)
 
 
-# Cropped Dataset
-stride = crop_size = 62
-cropped_dataset = ConcatDataset([
-    CroppedDataset(image, label_image, stride, crop_size)  # 62*4 = 248 < 249 and 250, the heights of the images
-    for image, label_image in zip(images, label_images)
-])
-cropped_dataset_train, cropped_dataset_val, cropped_dataset_test = split_dataset(
-    cropped_dataset, train_size=0.7, test_size=0.15, seed=random_state
-)
-cropped_dataset_train_aug = AugmentedDataset(
-    cropped_dataset_train, transform=flip_and_rotate, apply_on_target=True
-)
+# # Cropped Dataset
+# stride = crop_size = 62
+# cropped_dataset = ConcatDataset([
+#     CroppedDataset(image, label_image, stride, crop_size)  # 62*4 = 248 < 249 and 250, the heights of the images
+#     for image, label_image in zip(images, label_images)
+# ])
+# cropped_dataset_train, cropped_dataset_val, cropped_dataset_test = split_dataset(
+#     cropped_dataset, train_size=0.7, test_size=0.15, seed=random_state
+# )
+# cropped_dataset_train_aug = AugmentedDataset(
+#     cropped_dataset_train, transform=flip_and_rotate, apply_on_target=True
+# )
 
-# Use batch_size=2 when running locally
-cropped_loader_train_aug = DataLoader(cropped_dataset_train_aug, batch_size=16, shuffle=True, num_workers=0)
-cropped_loader_val = DataLoader(cropped_dataset_val, batch_size=16, num_workers=0)
-cropped_loader_test = DataLoader(cropped_dataset_test, batch_size=16, num_workers=0)
+# # Use batch_size=2 when running locally
+# cropped_loader_train_aug = DataLoader(cropped_dataset_train_aug, batch_size=16, shuffle=True, num_workers=0)
+# cropped_loader_val = DataLoader(cropped_dataset_val, batch_size=16, num_workers=0)
+# cropped_loader_test = DataLoader(cropped_dataset_test, batch_size=16, num_workers=0)
 
-display_segmentation(cropped_dataset_train_aug, 80, cmap=cmap, names=names, rgb=rgb, n_repeats=5)
+# display_segmentation(cropped_dataset_train_aug, 80, cmap=cmap, names=names, rgb=rgb, n_repeats=5)
 
     
-print('Training Random Forest and SVM...')
-train_traditional(images, label_images, names=names[1:], random_state=random_state)
-print('Training MLP...')
-train_mlp(images, label_images, names=names[1:], random_state=random_state, epochs=500)
-print('Training CNN...')
-train_cnn(patch_loader_train_aug, patch_loader_val, patch_loader_test, names=names[1:], epochs=500)
-print('Training ResNet...')
-train_resnet(rgb_loader_train_aug, rgb_loader_val, rgb_loader_test, names=names[1:], freeze_head=False, epochs=500)
-print('Training U-Net...')
-train_unet(cropped_loader_train_aug, cropped_loader_val, cropped_loader_test, names=names, epochs=500)
-print('Finished!')
+# print('Training Random Forest and SVM...')
+# train_traditional(images, label_images, names=names[1:], random_state=random_state)
+# print('Training MLP...')
+# train_mlp(images, label_images, names=names[1:], random_state=random_state, epochs=500)
+# print('Training CNN...')
+# train_cnn(patch_loader_train_aug, patch_loader_val, patch_loader_test, names=names[1:], epochs=500)
+# print('Training ResNet...')
+# train_resnet(rgb_loader_train_aug, rgb_loader_val, rgb_loader_test, names=names[1:], freeze_head=False, epochs=500)
+# print('Training U-Net...')
+# train_unet(cropped_loader_train_aug, cropped_loader_val, cropped_loader_test, names=names, epochs=500)
+# print('Finished!')
+
+# %%
+# Evaluate on the unlabelled dataset
+ckpt_path = ('colab_results/colab_logs/unet_results/lightning_logs/'
+             'version_0/checkpoints/epoch=302-step=2121.ckpt')
+model = LitUNet.load_from_checkpoint(ckpt_path)
+predict_all_images(validation_x_paths, (60, 60, 62), model, cmap, names, rgb)
 
 
+
+    
+    
 ##########################################################
 # COMMENTARY
 ##########################################################
@@ -1051,3 +1139,5 @@ print('Finished!')
 
 # Of all the models, only the segmentation model with no overlap
 # is the one that it test somewhat realistically.
+
+# %%
