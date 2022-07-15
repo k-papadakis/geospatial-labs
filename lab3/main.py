@@ -944,7 +944,9 @@ def train_unet(loader_train, loader_val, loader_test, names, epochs):
     evaluate_model(trainer, loader_test, names, ignore_index=0)
 
 
-def train_unet_overlap(crop_size, stride, images, label_images):
+def train_unet_overlap(
+    crop_size, stride, images, label_images, batch_size, epochs
+):
     dataset = ConcatDataset([
         CroppedDataset(image, label_image, stride=stride, crop_size=crop_size)
         for image, label_image in zip(images, label_images)
@@ -959,7 +961,7 @@ def train_unet_overlap(crop_size, stride, images, label_images):
         dataset, transform=flip_and_rotate, apply_on_target=True
     )
 
-    loader = DataLoader(dataset, batch_size=16, shuffle=True)
+    loader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
 
     model = LitUNet(176, 15, ignore_index=0, lr=1e-4)
     callbacks = [
@@ -967,7 +969,7 @@ def train_unet_overlap(crop_size, stride, images, label_images):
     ]
     trainer = pl.Trainer(
         accelerator='gpu',
-        max_epochs=500,
+        max_epochs=epochs,
         callbacks=callbacks,
         default_root_dir='unet_results_overlap'
     )
@@ -1139,9 +1141,9 @@ for image, label, path in zip(images, label_images, train_x_paths):
 # # Train U-Net with overlap on the entire dataset
 # # to use it for the final estimation.
 # train_unet_overlap(
-#     crop_size=62, stride=15, images=images, label_images=label_images
+#     crop_size=62, stride=15, images=images,
+#     label_images=label_images, epochs=300, batch_size=32
 # )
-
 # %%
 # Evaluate on the unlabelled dataset
 ckpt_path = (
