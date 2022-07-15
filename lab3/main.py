@@ -564,6 +564,7 @@ class UNet(nn.Module):
         b4 = self.up4(b3, a1)
         logits = self.exit(b4)
         return logits
+    
 
 class LitUNet(pl.LightningModule):
     
@@ -757,8 +758,9 @@ def flip_and_rotate(*tensors):
     # Flip vertically
     if random.random() > 0.5:
         tensors = [TF.vflip(t) for t in tensors]
-    # Rotate by 0, 1, 2, or 3 right angles 
-    if (k := random.randint(0, 4)) != 0:
+    # Rotate by 0, 1, 2, or 3 right angles
+    k = random.randint(0, 4)
+    if k != 0:
         tensors = [TF.rotate(t, k * 90) for t in tensors]
     
     # Undo the expansion
@@ -941,6 +943,8 @@ def evaluate_model(trainer, dataset_test, names, ignore_index=None):
         display_labels=names,
     ).plot(xticks_rotation=90, ax=ax, colorbar=False)
     ax.set_title(title)
+    plt.savefig(f'{title}.png')
+    return ax
     
 
 def train_traditional(images, label_images, names, random_state=None):
@@ -973,6 +977,9 @@ def train_traditional(images, label_images, names, random_state=None):
     
     axs[1].set_yticks([])
     
+    plt.savefig('traditional.png')
+    return axs
+    
     
 def train_mlp(images, label_images, names, epochs=50, random_state=None):
     xs, ys = make_pixel_dataset(images, label_images)
@@ -983,14 +990,14 @@ def train_mlp(images, label_images, names, epochs=50, random_state=None):
     pixel_dataset_train, pixel_dataset_val, pixel_dataset_test = split_dataset(
         pixel_dataset, train_size=0.7, test_size=0.15, seed=random_state
     )
-    pixel_loader_train = DataLoader(pixel_dataset_train, batch_size=128, num_workers=4, shuffle=True)
-    pixel_loader_val = DataLoader(pixel_dataset_val, batch_size=128, num_workers=4)
-    pixel_loader_test = DataLoader(pixel_dataset_test, batch_size=128, num_workers=4)
+    pixel_loader_train = DataLoader(pixel_dataset_train, batch_size=512, num_workers=2, shuffle=True)
+    pixel_loader_val = DataLoader(pixel_dataset_val, batch_size=512, num_workers=2)
+    pixel_loader_test = DataLoader(pixel_dataset_test, batch_size=512, num_workers=2)
     
     mlp = LitMLP(176, 14, lr=1e-3, weight_decay=1e-5)
     
     callbacks = [
-        EarlyStopping(monitor='accuracy/val', mode='max', patience=5),
+        # EarlyStopping(monitor='accuracy/val', mode='max', patience=10),
         ModelCheckpoint(monitor='accuracy/val', mode='max', save_last=True),
     ]
     trainer = pl.Trainer(
@@ -1008,7 +1015,7 @@ def train_cnn(loader_train, loader_val, loader_test, names, epochs=50):
     # The labels don't, but because the labels are locally continuous, we have information leakage via the images!
     cnn = LitCNN(176, 14, lr=1e-3)
     callbacks = [
-        EarlyStopping(monitor='accuracy/val', mode='max', patience=5),
+        # EarlyStopping(monitor='accuracy/val', mode='max', patience=10),
         ModelCheckpoint(monitor='accuracy/val', mode='max', save_last=True)
     ]
     trainer = pl.Trainer(
@@ -1026,7 +1033,7 @@ def train_resnet(loader_train, loader_val, loader_test, names, freeze_head=False
     resnet = TransferResNet(14, freeze_head=freeze_head, lr=1e-4)
     
     callbacks = [
-        EarlyStopping(monitor='accuracy/val', mode='max', patience=5),
+        # EarlyStopping(monitor='accuracy/val', mode='max', patience=10),
         ModelCheckpoint(monitor='accuracy/val', mode='max', save_last=True),
     ]
     trainer = pl.Trainer(
@@ -1043,7 +1050,7 @@ def train_unet(loader_train, loader_val, loader_test, names, epochs):
     model = LitUNet(176, 15, ignore_index=0, lr=1e-4)
     callbacks = [
         # Too much variance due sample size variability due to label exclusion
-        # EarlyStopping(monitor='accuracy/val', mode='max', patience=20),
+        # EarlyStopping(monitor='accuracy/val', mode='max', patience=10),
         ModelCheckpoint(monitor='accuracy/val', mode='max', save_last=False),
     ]
     trainer = pl.Trainer(
@@ -1123,7 +1130,7 @@ def predict_image_unet(src_path, dst_path, size, model):
 
 def predict_all_images_unet(
     paths, sizes, model,
-    cmap, names, rgb, suffix='unet'
+    cmap, classnames, rgb, suffix='_unet'
 ):
     
     output_dir = Path('output')
@@ -1131,15 +1138,16 @@ def predict_all_images_unet(
     
     for src_path, size in zip(paths, sizes):
         src_path = Path(src_path)
-        tiff_dst_path = output_dir / Path(src_path.stem + f'_pred_{suffix}.tif')
-        png_dst_path = output_dir / Path(src_path.stem + f'_pred_{suffix}.png')
+        tiff_dst_path = output_dir / Path(src_path.stem + f'_pred{suffix}.tif')
+        png_dst_path = output_dir / Path(src_path.stem + f'_pred{suffix}.png')
         
         predict_image_unet(src_path, tiff_dst_path, size, model)
         
         image = load_image(src_path)
         label = load_label(tiff_dst_path)
         display_image_and_label(
-            image, label, cmap, names, rgb, src_path.stem + suffix
+            image=image, label=label, cmap=cmap, classnames=classnames,
+            rgb=rgb, title=src_path.stem + suffix
         )
         
         plt.savefig(png_dst_path)
@@ -1171,31 +1179,31 @@ def predict_image_cnn(src_path, dst_path, model, batch_size, patch_size=15):
         
 def predict_all_images_cnn(
     paths, model, batch_size,
-    cmap, classnames, rgb, suffix='cnn'
+    cmap, classnames, rgb, suffix='_cnn'
 ):
     output_dir = Path('output')
     output_dir.mkdir(exist_ok=True)
     
     for src_path in paths:
         src_path = Path(src_path)
-        tiff_dst_path = output_dir / Path(src_path.stem + f'_pred_{suffix}.tif')
-        png_dst_path = output_dir / Path(src_path.stem + f'_pred_{suffix}.png')
+        tiff_dst_path = output_dir / Path(src_path.stem + f'_pred{suffix}.tif')
+        png_dst_path = output_dir / Path(src_path.stem + f'_pred{suffix}.png')
         
         predict_image_cnn(src_path, tiff_dst_path, model, batch_size)
         
         image = load_image(src_path)
         label = load_label(tiff_dst_path)
         display_image_and_label(
-            image, label, cmap, classnames, rgb, src_path.stem + suffix
+            image=image, label=label, cmap=cmap, classnames=classnames,
+            rgb=rgb, title=src_path.stem + suffix
         )
         
         plt.savefig(png_dst_path)
-        
 
 # %%
 # if __name__ == '__main__':
-random_state=42
-rgb=(23, 11, 7)
+random_state = 42
+rgb = (23, 11, 7)
 info_path = 'hyrank_info.csv'
 train_x_paths = (
     'HyRANK_satellite/TrainingSet/Dioni.tif',
@@ -1215,16 +1223,17 @@ validation_x_paths = (
 # LOAD THE IMAGES AND THEIR INFO
 images, label_images = read_data(train_x_paths, train_y_paths)
 info = read_info(info_path)
-names=info['name']
-colors=info['color']
-cmap=mpl.colors.ListedColormap(info['color'])
+names = info['name']
+colors = info['color']
+cmap = mpl.colors.ListedColormap(info['color'])
 
 # Display the training data
+output_dir = Path('output')
+output_dir.mkdir(exist_ok=True)
 for image, label, path in zip(images, label_images, train_x_paths):
     path = Path(path)
     display_image_and_label(image, label, cmap, names, rgb, path.stem)
-    plt.savefig(path.with_suffix('.png').name)
-    
+    plt.savefig(output_dir / path.with_suffix('.png').name)
 
 # %%
 # CREATE DATASETS AND DATALOADERS
@@ -1239,16 +1248,16 @@ patch_dataset_train, patch_dataset_val, patch_dataset_test = split_dataset(
 )
 patch_dataset_train_aug = AugmentedDataset(patch_dataset_train, flip_and_rotate)
 
-patch_loader_train = DataLoader(patch_dataset_train, batch_size=64, shuffle=True, num_workers=64)
-patch_loader_train_aug = DataLoader(patch_dataset_train_aug, batch_size=64, shuffle=True, num_workers=64)
-patch_loader_val = DataLoader(patch_dataset_val, batch_size=64, num_workers=64)
-patch_loader_test = DataLoader(patch_dataset_test, batch_size=64, num_workers=64)
+patch_loader_train = DataLoader(patch_dataset_train, batch_size=64, shuffle=True, num_workers=2)
+patch_loader_train_aug = DataLoader(patch_dataset_train_aug, batch_size=64, shuffle=True, num_workers=2)
+patch_loader_val = DataLoader(patch_dataset_val, batch_size=64, num_workers=2)
+patch_loader_test = DataLoader(patch_dataset_test, batch_size=64, num_workers=2)
 
 fig, axs = plt.subplots(nrows=5, figsize=(4, 5))
 for ax in axs.flat:
     display_patch(patch_dataset_train_aug, 200, rgb=rgb, ax=ax)
     ax.set_axis_off()
-    
+plt.savefig(output_dir / 'display_patch.png')
 
 # Patch Dataset RGB Only   
 rgb_dataset = ConcatDataset([
@@ -1260,10 +1269,10 @@ rgb_dataset_train, rgb_dataset_val, rgb_dataset_test = split_dataset(
 )
 rgb_dataset_train_aug = AugmentedDataset(rgb_dataset_train, flip_and_rotate)
 
-rgb_loader_train = DataLoader(rgb_dataset_train, batch_size=128, shuffle=True, num_workers=8)
-rgb_loader_train_aug = DataLoader(rgb_dataset_train_aug, batch_size=128, shuffle=True, num_workers=8)
-rgb_loader_val = DataLoader(rgb_dataset_val, batch_size=128, num_workers=8)
-rgb_loader_test = DataLoader(rgb_dataset_test, batch_size=128, num_workers=8)
+rgb_loader_train = DataLoader(rgb_dataset_train, batch_size=256, shuffle=True, num_workers=2)
+rgb_loader_train_aug = DataLoader(rgb_dataset_train_aug, batch_size=256, shuffle=True, num_workers=2)
+rgb_loader_val = DataLoader(rgb_dataset_val, batch_size=256, num_workers=2)
+rgb_loader_test = DataLoader(rgb_dataset_test, batch_size=256, num_workers=2)
 
 
 # Cropped Dataset
@@ -1282,9 +1291,9 @@ cropped_dataset_train_aug = AugmentedDataset(
 )
 
 # Use batch_size=2 when running locally
-cropped_loader_train_aug = DataLoader(cropped_dataset_train_aug, batch_size=16, shuffle=True, num_workers=0)
-cropped_loader_val = DataLoader(cropped_dataset_val, batch_size=16, num_workers=0)
-cropped_loader_test = DataLoader(cropped_dataset_test, batch_size=16, num_workers=0)
+cropped_loader_train_aug = DataLoader(cropped_dataset_train_aug, batch_size=32, shuffle=True, num_workers=2)
+cropped_loader_val = DataLoader(cropped_dataset_val, batch_size=32, num_workers=2)
+cropped_loader_test = DataLoader(cropped_dataset_test, batch_size=32, num_workers=2)
 
 display_segmentation(cropped_dataset_train_aug, 80, cmap=cmap, names=names, rgb=rgb, n_repeats=5)
 
@@ -1292,13 +1301,13 @@ display_segmentation(cropped_dataset_train_aug, 80, cmap=cmap, names=names, rgb=
 print('\nTraining Random Forest and SVM...')
 train_traditional(images, label_images, names=names[1:], random_state=random_state)
 print('\nTraining MLP...')
-train_mlp(images, label_images, names=names[1:], random_state=random_state, epochs=2)
+train_mlp(images, label_images, names=names[1:], random_state=random_state, epochs=200)
 print('\nTraining CNN...')
-train_cnn(patch_loader_train_aug, patch_loader_val, patch_loader_test, names=names[1:], epochs=2)
+train_cnn(patch_loader_train_aug, patch_loader_val, patch_loader_test, names=names[1:], epochs=200)
 print('\nTraining ResNet...')
-train_resnet(rgb_loader_train_aug, rgb_loader_val, rgb_loader_test, names=names[1:], freeze_head=False, epochs=2)
+train_resnet(rgb_loader_train_aug, rgb_loader_val, rgb_loader_test, names=names[1:], freeze_head=False, epochs=200)
 print('\nTraining U-Net...')
-train_unet(cropped_loader_train_aug, cropped_loader_val, cropped_loader_test, names=names, epochs=2)
+train_unet(cropped_loader_train_aug, cropped_loader_val, cropped_loader_test, names=names, epochs=100)
 print('\nFinished!')
 
 # # Train U-Net with overlap on the entire dataset
@@ -1308,17 +1317,6 @@ print('\nFinished!')
 #     label_images=label_images, epochs=300, batch_size=32
 # )
 
-# Evaluate on the unlabelled dataset
-ckpt_path_unet = (
-    'unet_results_overlap/lightning_logs/'
-    'version_0/checkpoints/epoch=280-step=16860.ckpt'
-)
-model = LitUNet.load_from_checkpoint(ckpt_path_unet)
-predict_all_images_unet(
-    paths=validation_x_paths, sizes=(60, 60, 62),
-    model=model, cmap=cmap, names=names, rgb=rgb
-)
-
 ckpt_path_cnn = (
     'cnn_results/lightning_logs/version_0/checkpoints/epoch=1-step=5868.ckpt'
 )
@@ -1327,6 +1325,17 @@ model = LitCNN.load_from_checkpoint(ckpt_path_cnn)
 predict_all_images_cnn(
     paths=validation_x_paths, model=model, batch_size=64,
     cmap=cmap, classnames=names, rgb=rgb,
+)
+
+# Evaluate on the unlabelled dataset
+ckpt_path_unet = (
+    'unet_results_overlap/lightning_logs/'
+    'version_0/checkpoints/epoch=280-step=16860.ckpt'
+)
+model = LitUNet.load_from_checkpoint(ckpt_path_unet)
+predict_all_images_unet(
+    paths=validation_x_paths, sizes=(60, 60, 62),
+    model=model, cmap=cmap, classnames=names, rgb=rgb
 )
 
 ##########################################################
