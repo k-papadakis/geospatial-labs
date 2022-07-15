@@ -312,7 +312,7 @@ class LitMLP(pl.LightningModule):
     def predict_step(self, batch, batch_idx):
         x, y = batch
         logits = self(x)
-        pred = torch.argmax(logits, -1)
+        pred = torch.argmax(logits, 1)
         return pred 
     
     def training_step(self, batch,  batch_idx):
@@ -360,46 +360,51 @@ class LitMLP(pl.LightningModule):
     
 
 class LitCNN(pl.LightningModule):
-    """Deep CNN with skip connections between convolutions that are two steps away"""
+    """Deep CNN with skip connections between convolutions that are two steps away
+    Expects a 15 by 15 image.
+    """
     
     def __init__(self, channels_in, n_classes, lr=1e-3):
         super().__init__()
 
         self.stem = nn.Sequential(
             nn.Conv2d(channels_in, 32, kernel_size=3, stride=1, padding='same'),
+            nn.BatchNorm2d(32),
             nn.ReLU(),
             nn.Conv2d(32, 64, kernel_size=3, stride=1, padding='same'),
-            nn.ReLU()
+            nn.BatchNorm2d(64),
+            nn.ReLU(),
         )
         self.block1 = nn.Sequential(
             nn.Conv2d(64, 64, kernel_size=3, stride=1, padding='same'),
+            nn.BatchNorm2d(64),
             nn.ReLU(),
             nn.Conv2d(64, 64, kernel_size=3, stride=1, padding='same'),
-            nn.ReLU()
+            nn.BatchNorm2d(64),
+            nn.ReLU(),
         )
         self.block2 = nn.Sequential(
             nn.Conv2d(64, 64, kernel_size=3, stride=1, padding='same'),
+            nn.BatchNorm2d(64),
             nn.ReLU(),
             nn.Conv2d(64, 64, kernel_size=3, stride=1, padding='same'),
+            nn.BatchNorm2d(64),
             nn.ReLU()
         )
         self.block3 = nn.Sequential(
             nn.Conv2d(64, 64, kernel_size=3, stride=1, padding='same'),
+            nn.BatchNorm2d(64),
             nn.ReLU(),
             nn.Conv2d(64, 64, kernel_size=3, stride=1, padding='same'),
-            nn.ReLU()
-        )
-        self.block4 = nn.Sequential(
-            nn.Conv2d(64, 64, kernel_size=3, stride=1, padding='same'),
+            nn.BatchNorm2d(64),
             nn.ReLU(),
-            nn.Conv2d(64, 64, kernel_size=3, stride=1, padding='same'),
-            nn.ReLU()
         )
+
         self.classifier = nn.Sequential(
             nn.Flatten(),
-            nn.Linear(4*4*64, 128),  # adaptive pool (4, 4)
+            nn.Linear(3*3*64, 128),
             nn.ReLU(),
-            nn.Linear(128, n_classes)
+            nn.Linear(128, n_classes),
         )
         
         self.lr = lr
@@ -425,14 +430,11 @@ class LitCNN(pl.LightningModule):
         x = x + self.block2(x)
         x = F.max_pool2d(x, kernel_size=2, stride=2) 
         x = x + self.block3(x)
-        x = F.max_pool2d(x, kernel_size=2, stride=2) 
-        x = x + self.block4(x)
-        x = F.adaptive_avg_pool2d(x, output_size=(4, 4))
         x = self.classifier(x)
         return x
     
     def predict_step(self, batch, batch_idx):
-        x, y = batch
+        x = batch
         logits = self(x)
         pred = torch.argmax(logits, -1)
         return pred
@@ -481,6 +483,7 @@ class LitCNN(pl.LightningModule):
         return optimizer
 
 
+# %%
 # U-Net Construction
 class ConvBlock(nn.Module):
     
@@ -1101,8 +1104,8 @@ def predict_image_unet(src_path, dst_path, size, model):
     # Write to disk
     with rasterio.open(
         dst_path, 'w',
-        width=dataset.img_w,
-        height=dataset.img_h,
+        height=dataset.image.shape[-2],
+        width=dataset.image.shape[-1],
         count=1,
         dtype=rasterio.uint8,
         driver='Gtiff',
@@ -1120,18 +1123,71 @@ def predict_image_unet(src_path, dst_path, size, model):
 
 def predict_all_images_unet(
     paths, sizes, model,
-    cmap, names, rgb, suffix='_unet'
+    cmap, names, rgb, suffix='unet'
 ):
+    
+    output_dir = Path('output')
+    output_dir.mkdir(exist_ok=True)
+    
     for src_path, size in zip(paths, sizes):
         src_path = Path(src_path)
-        tiff_dst_path = Path(src_path.stem + f'_pred{suffix}.tif')
-        png_dst_path = Path(src_path.stem + f'_pred{suffix}.png')
+        tiff_dst_path = output_dir / Path(src_path.stem + f'_pred_{suffix}.tif')
+        png_dst_path = output_dir / Path(src_path.stem + f'_pred_{suffix}.png')
         
         predict_image_unet(src_path, tiff_dst_path, size, model)
         
         image = load_image(src_path)
         label = load_label(tiff_dst_path)
-        display_image_and_label(image, label, cmap, names, rgb, src_path.stem)
+        display_image_and_label(
+            image, label, cmap, names, rgb, src_path.stem + suffix
+        )
+        
+        plt.savefig(png_dst_path)
+        
+
+def predict_image_cnn(src_path, dst_path, model, batch_size, patch_size=15):
+    # Load from disk
+    image = load_image(src_path)
+    dataset = PatchDatasetPostPad(image, None, patch_size=patch_size)
+    loader = DataLoader(dataset, batch_size=batch_size)
+    
+    # Predict
+    trainer = pl.Trainer(accelerator='gpu')
+    preds = trainer.predict(model, loader)
+    preds = torch.cat(preds)
+    preds = preds.reshape(dataset.image.shape[-2:])
+    
+    # Write to disk
+    with rasterio.open(
+        dst_path, 'w',
+        height=dataset.image.shape[-2],
+        width=dataset.image.shape[-1],
+        count=1,
+        dtype=rasterio.uint8,
+        driver='Gtiff',
+    ) as dst:
+        dst.write(preds.numpy().astype(rasterio.uint8)[np.newaxis, ...])
+        
+        
+def predict_all_images_cnn(
+    paths, model, batch_size,
+    cmap, classnames, rgb, suffix='cnn'
+):
+    output_dir = Path('output')
+    output_dir.mkdir(exist_ok=True)
+    
+    for src_path in paths:
+        src_path = Path(src_path)
+        tiff_dst_path = output_dir / Path(src_path.stem + f'_pred_{suffix}.tif')
+        png_dst_path = output_dir / Path(src_path.stem + f'_pred_{suffix}.png')
+        
+        predict_image_cnn(src_path, tiff_dst_path, model, batch_size)
+        
+        image = load_image(src_path)
+        label = load_label(tiff_dst_path)
+        display_image_and_label(
+            image, label, cmap, classnames, rgb, src_path.stem + suffix
+        )
         
         plt.savefig(png_dst_path)
         
@@ -1163,20 +1219,19 @@ names=info['name']
 colors=info['color']
 cmap=mpl.colors.ListedColormap(info['color'])
 
-# # Display the training data
-# for image, label, path in zip(images, label_images, train_x_paths):
-#     path = Path(path)
-#     display_image_and_label(image, label, cmap, names, rgb, path.stem)
-#     plt.savefig(path.with_suffix('.png').name)
+# Display the training data
+for image, label, path in zip(images, label_images, train_x_paths):
+    path = Path(path)
+    display_image_and_label(image, label, cmap, names, rgb, path.stem)
+    plt.savefig(path.with_suffix('.png').name)
     
 
 # %%
 # CREATE DATASETS AND DATALOADERS
 
 # Patch Dataset All Channels
-patch_size = 15
 patch_dataset = ConcatDataset([
-    PatchDatasetPostPad(image, label_image, patch_size)
+    PatchDatasetPostPad(image, label_image, patch_size=15)
     for image, label_image in zip(images, label_images)
 ])
 patch_dataset_train, patch_dataset_val, patch_dataset_test = split_dataset(
@@ -1184,68 +1239,67 @@ patch_dataset_train, patch_dataset_val, patch_dataset_test = split_dataset(
 )
 patch_dataset_train_aug = AugmentedDataset(patch_dataset_train, flip_and_rotate)
 
-patch_loader_train = DataLoader(patch_dataset_train, batch_size=64, shuffle=True, num_workers=8)
-patch_loader_train_aug = DataLoader(patch_dataset_train_aug, batch_size=64, shuffle=True, num_workers=8)
-patch_loader_val = DataLoader(patch_dataset_val, batch_size=64, num_workers=8)
-patch_loader_test = DataLoader(patch_dataset_test, batch_size=64, num_workers=8)
+patch_loader_train = DataLoader(patch_dataset_train, batch_size=64, shuffle=True, num_workers=64)
+patch_loader_train_aug = DataLoader(patch_dataset_train_aug, batch_size=64, shuffle=True, num_workers=64)
+patch_loader_val = DataLoader(patch_dataset_val, batch_size=64, num_workers=64)
+patch_loader_test = DataLoader(patch_dataset_test, batch_size=64, num_workers=64)
 
-# fig, axs = plt.subplots(nrows=5, figsize=(4, 5))
-# for ax in axs.flat:
-#     display_patch(patch_dataset_train_aug, 200, rgb=rgb, ax=ax)
-#     ax.set_axis_off()
+fig, axs = plt.subplots(nrows=5, figsize=(4, 5))
+for ax in axs.flat:
+    display_patch(patch_dataset_train_aug, 200, rgb=rgb, ax=ax)
+    ax.set_axis_off()
     
 
-# # Patch Dataset RGB Only   
-# rgb_dataset = ConcatDataset([
-#     PatchDataset(image, label_image, patch_size, channels=rgb)
-#     for image, label_image in zip(images, label_images)
-# ])
-# rgb_dataset_train, rgb_dataset_val, rgb_dataset_test = split_dataset(
-#     rgb_dataset, train_size=0.7, test_size=0.15, seed=random_state
-# )
-# rgb_dataset_train_aug = AugmentedDataset(rgb_dataset_train, flip_and_rotate)
+# Patch Dataset RGB Only   
+rgb_dataset = ConcatDataset([
+    PatchDatasetPostPad(image, label_image, patch_size=15, channels=rgb)
+    for image, label_image in zip(images, label_images)
+])
+rgb_dataset_train, rgb_dataset_val, rgb_dataset_test = split_dataset(
+    rgb_dataset, train_size=0.7, test_size=0.15, seed=random_state
+)
+rgb_dataset_train_aug = AugmentedDataset(rgb_dataset_train, flip_and_rotate)
 
-# rgb_loader_train = DataLoader(rgb_dataset_train, batch_size=128, shuffle=True, num_workers=8)
-# rgb_loader_train_aug = DataLoader(rgb_dataset_train_aug, batch_size=128, shuffle=True, num_workers=8)
-# rgb_loader_val = DataLoader(rgb_dataset_val, batch_size=128, num_workers=8)
-# rgb_loader_test = DataLoader(rgb_dataset_test, batch_size=128, num_workers=8)
+rgb_loader_train = DataLoader(rgb_dataset_train, batch_size=128, shuffle=True, num_workers=8)
+rgb_loader_train_aug = DataLoader(rgb_dataset_train_aug, batch_size=128, shuffle=True, num_workers=8)
+rgb_loader_val = DataLoader(rgb_dataset_val, batch_size=128, num_workers=8)
+rgb_loader_test = DataLoader(rgb_dataset_test, batch_size=128, num_workers=8)
 
 
-# # Cropped Dataset
-# # 62*4 = 248 < 249 and 250, the heights of the images
-# stride = 62
-# crop_size = 62
-# cropped_dataset = ConcatDataset([
-#     CroppedDataset(image, label_image, crop_size=crop_size, stride=stride)  
-#     for image, label_image in zip(images, label_images)
-# ])
-# cropped_dataset_train, cropped_dataset_val, cropped_dataset_test = split_dataset(
-#     cropped_dataset, train_size=0.7, test_size=0.15, seed=random_state
-# )
-# cropped_dataset_train_aug = AugmentedDataset(
-#     cropped_dataset_train, transform=flip_and_rotate, apply_on_target=True
-# )
+# Cropped Dataset
+# 62*4 = 248 < 249 and 250, the heights of the images
+stride = 62
+crop_size = 62
+cropped_dataset = ConcatDataset([
+    CroppedDataset(image, label_image, crop_size=crop_size, stride=stride)  
+    for image, label_image in zip(images, label_images)
+])
+cropped_dataset_train, cropped_dataset_val, cropped_dataset_test = split_dataset(
+    cropped_dataset, train_size=0.7, test_size=0.15, seed=random_state
+)
+cropped_dataset_train_aug = AugmentedDataset(
+    cropped_dataset_train, transform=flip_and_rotate, apply_on_target=True
+)
 
-# # Use batch_size=2 when running locally
-# cropped_loader_train_aug = DataLoader(cropped_dataset_train_aug, batch_size=16, shuffle=True, num_workers=0)
-# cropped_loader_val = DataLoader(cropped_dataset_val, batch_size=16, num_workers=0)
-# cropped_loader_test = DataLoader(cropped_dataset_test, batch_size=16, num_workers=0)
+# Use batch_size=2 when running locally
+cropped_loader_train_aug = DataLoader(cropped_dataset_train_aug, batch_size=16, shuffle=True, num_workers=0)
+cropped_loader_val = DataLoader(cropped_dataset_val, batch_size=16, num_workers=0)
+cropped_loader_test = DataLoader(cropped_dataset_test, batch_size=16, num_workers=0)
 
-# display_segmentation(cropped_dataset_train_aug, 80, cmap=cmap, names=names, rgb=rgb, n_repeats=5)
+display_segmentation(cropped_dataset_train_aug, 80, cmap=cmap, names=names, rgb=rgb, n_repeats=5)
 
     
-# print('Training Random Forest and SVM...')
-# train_traditional(images, label_images, names=names[1:], random_state=random_state)
-# print('Training MLP...')
-# train_mlp(images, label_images, names=names[1:], random_state=random_state, epochs=500)
-# print('Training CNN...')
-train_cnn(patch_loader_train_aug, patch_loader_val, patch_loader_test, names=names[1:], epochs=500)
-# print('Training ResNet...')
-# train_resnet(rgb_loader_train_aug, rgb_loader_val, rgb_loader_test, names=names[1:], freeze_head=False, epochs=500)
-# print('Training U-Net...')
-# train_unet(cropped_loader_train_aug, cropped_loader_val, cropped_loader_test, names=names, epochs=500)
-# print('Finished!')
-
+print('\nTraining Random Forest and SVM...')
+train_traditional(images, label_images, names=names[1:], random_state=random_state)
+print('\nTraining MLP...')
+train_mlp(images, label_images, names=names[1:], random_state=random_state, epochs=2)
+print('\nTraining CNN...')
+train_cnn(patch_loader_train_aug, patch_loader_val, patch_loader_test, names=names[1:], epochs=2)
+print('\nTraining ResNet...')
+train_resnet(rgb_loader_train_aug, rgb_loader_val, rgb_loader_test, names=names[1:], freeze_head=False, epochs=2)
+print('\nTraining U-Net...')
+train_unet(cropped_loader_train_aug, cropped_loader_val, cropped_loader_test, names=names, epochs=2)
+print('\nFinished!')
 
 # # Train U-Net with overlap on the entire dataset
 # # to use it for the final estimation.
@@ -1254,16 +1308,26 @@ train_cnn(patch_loader_train_aug, patch_loader_val, patch_loader_test, names=nam
 #     label_images=label_images, epochs=300, batch_size=32
 # )
 
-# # Evaluate on the unlabelled dataset
-# ckpt_path = (
-#     'unet_results_overlap/lightning_logs/'
-#     'version_0/checkpoints/epoch=280-step=16860.ckpt'
-# )
-# model = LitUNet.load_from_checkpoint(ckpt_path)
-# predict_all_images_unet(
-#     paths=validation_x_paths, sizes=(60, 60, 62),
-#     model=model, cmap=cmap, names=names, rgb=rgb
-# )
+# Evaluate on the unlabelled dataset
+ckpt_path_unet = (
+    'unet_results_overlap/lightning_logs/'
+    'version_0/checkpoints/epoch=280-step=16860.ckpt'
+)
+model = LitUNet.load_from_checkpoint(ckpt_path_unet)
+predict_all_images_unet(
+    paths=validation_x_paths, sizes=(60, 60, 62),
+    model=model, cmap=cmap, names=names, rgb=rgb
+)
+
+ckpt_path_cnn = (
+    'cnn_results/lightning_logs/version_0/checkpoints/epoch=1-step=5868.ckpt'
+)
+model = LitCNN.load_from_checkpoint(ckpt_path_cnn)
+ 
+predict_all_images_cnn(
+    paths=validation_x_paths, model=model, batch_size=64,
+    cmap=cmap, classnames=names, rgb=rgb,
+)
 
 ##########################################################
 # COMMENTARY
@@ -1293,11 +1357,3 @@ train_cnn(patch_loader_train_aug, patch_loader_val, patch_loader_test, names=nam
 # Of all the models, only the segmentation model with no overlap
 # is the one that it test somewhat realistically.
 
-# %%
-# ckpt_path = (
-#     'colab_results/colab_logs/cnn_results/lightning_logs/'
-#     'version_0/checkpoints/epoch=28-step=10237.ckpt'
-# )
-# model = LitCNN.load_from_checkpoint(ckpt_path)
-
-# %%
