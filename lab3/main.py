@@ -35,8 +35,11 @@ from torchvision.models import resnet18
 # PYTORCH DATASETS
 ##########################################################
 
-class PatchDataset(Dataset):
-    """Patches of specified size around the pixels whose label is non zero"""
+class PatchDatasetNoPad(Dataset):
+    """Patches of specified size around the pixels whose label is non zero.
+    No use of padding.
+    Instead, ignore pixels whose patch doesn't lie inside the image.
+    """
     
     def __init__(self, image, label_image, patch_size, channels=None, transform=None):
         super().__init__()
@@ -46,35 +49,142 @@ class PatchDataset(Dataset):
             
         # Keep only the pixels that are labelled and whose patch lies inside the image 
         r = patch_size // 2
-        is_inner = np.full_like(label_image, False, bool)
+        is_inner = np.full(image.shape[-2:], False, bool)
         is_inner[r:-r, r:-r] = True
-        self.indices = np.nonzero((label_image != 0) & is_inner)
-
-        self.labels = label_image[self.indices]
-        # Remap labels 1..14 --> 0..13
-        self.labels = self.labels - 1
+        if label_image is not None:
+            self.indices = np.nonzero((label_image != 0) & is_inner)
+            self.labels = label_image[self.indices]
+            # Remap labels 1..14 --> 0..13
+            self.labels = self.labels - 1
+        else:
+            self.indices = np.nonzero(is_inner)
+            self.labels = None
             
         self.patch_size = patch_size
         self.transform = transform
         
     def __len__(self):
-        return len(self.labels)
+        return len(self.indices[0])
     
     def __getitem__(self, idx):
         i, j = self.indices[0][idx], self.indices[1][idx]
         r = self.patch_size // 2
         x = self.image[self.channels, i-r : i+r+1, j-r : j+r+1]
-        y = self.labels[idx]
         
         x = torch.tensor(x, dtype=torch.float32)
-        y = torch.tensor(y, dtype=torch.int64)
-        
         if self.transform is not None:
             x = self.transform(x)
-            
-        return x, y
+        
+        if self.labels is not None:
+            y = self.labels[idx]
+            y = torch.tensor(y, dtype=torch.int64)
+            return x, y
+        else:
+            return x
 
 
+class PatchDatasetPrePad(Dataset):
+    """Patches of specified size around the pixels whose label is non zero.
+    Pads the entire image before slicing. Results in uneven padding
+    """
+    
+    def __init__(self, image, label_image, patch_size, channels=None, transform=None):
+        super().__init__()
+        
+        self.transform = transform
+        self.channels = channels if channels is not None else slice(None)
+        self.patch_size = patch_size
+        r = patch_size // 2
+        self.padded_image = np.pad(image, ((0,0), (r,r), (r,r)))
+        
+        if label_image is not None:
+            # Keep only the pixels that are labelled
+            self.indices = np.nonzero(label_image)
+            self.labels = label_image[self.indices]
+            # Remap labels 1..14 --> 0..13
+            self.labels = self.labels - 1
+        else:
+           self.indices = tuple(map(np.ravel, np.indices(image.shape[-2:])))
+           self.labels = None
+        
+    def __len__(self):
+        return len(self.indices[0])
+    
+    def __getitem__(self, idx):
+        i, j = self.indices[0][idx], self.indices[1][idx]
+        r = self.patch_size // 2
+        x = self.padded_image[self.channels, i : 1+i+2*r, j : 1+j+2*r]
+        
+        x = torch.tensor(x, dtype=torch.float32)
+        if self.transform is not None:
+            x = self.transform(x)
+        
+        if self.labels is not None:    
+            y = self.labels[idx]
+            y = torch.tensor(y, dtype=torch.int64)
+            return x, y
+        else:
+            return x
+
+
+class PatchDatasetPostPad(Dataset):
+    """Patches of specified size around the pixels whose label is non zero.
+    Slices a patch and then pads it equally on each side.
+    """
+    
+    def __init__(self, image, label_image, patch_size, channels=None, transform=None):
+        super().__init__()
+        
+        self.transform = transform
+        self.channels = channels if channels is not None else slice(None)
+        self.patch_size = patch_size
+        self.image = image
+        
+        if label_image is not None:
+            # Keep only the pixels that are labelled
+            self.indices = np.nonzero(label_image)
+            self.labels = label_image[self.indices]
+            # Remap labels 1..14 --> 0..13
+            self.labels = self.labels - 1
+        else:
+           self.indices = tuple(map(np.ravel, np.indices(image.shape[-2:])))
+           self.labels = None
+        
+    def __len__(self):
+        return len(self.indices[0])
+    
+    def __getitem__(self, idx):
+        i, j = self.indices[0][idx], self.indices[1][idx]
+        r = self.patch_size // 2
+        
+        i_min = max(0, i-r)
+        i_max = min(i+r+1, self.image.shape[-2] - 1)
+        j_min = max(0, j-r)
+        j_max = min(j+r+1, self.image.shape[-1] - 1)
+        x = self.image[self.channels, i_min : i_max, j_min : j_max]
+        
+        h, w = x.shape[-2:]
+        h_pad = self.patch_size - h
+        w_pad = self.patch_size - w
+        padding = (
+            (0, 0),
+            (h_pad // 2, h_pad - h_pad//2),
+            (w_pad // 2, w_pad - w_pad//2)
+        )
+        x = np.pad(x, padding)
+        
+        x = torch.tensor(x, dtype=torch.float32)
+        if self.transform is not None:
+            x = self.transform(x)
+        
+        if self.labels is not None:    
+            y = self.labels[idx]
+            y = torch.tensor(y, dtype=torch.int64)
+            return x, y
+        else:
+            return x
+        
+        
 class CroppedDataset(Dataset):
     """Sliding window over an image and its label"""
     
@@ -982,7 +1092,7 @@ def train_unet_overlap(
 # IMAGE PREDICTION FUNCTIONS
 ##########################################################
 
-def predict_image(src_path, dst_path, size, model):
+def predict_image_unet(src_path, dst_path, size, model):
     # Load from disk
     image = load_image(src_path)
     dataset = CroppedDataset(image, None, size, size)
@@ -1008,16 +1118,16 @@ def predict_image(src_path, dst_path, size, model):
             dst.write(preds, window=window)
 
 
-def predict_all_images(
-    validation_x_paths, sizes, model,
-    cmap, names, rgb
+def predict_all_images_unet(
+    paths, sizes, model,
+    cmap, names, rgb, suffix='_unet'
 ):
-    for src_path, size in zip(validation_x_paths, sizes):
+    for src_path, size in zip(paths, sizes):
         src_path = Path(src_path)
-        tiff_dst_path = Path(src_path.stem + '_pred.tif')
-        png_dst_path = Path(src_path.stem + '_pred.png')
+        tiff_dst_path = Path(src_path.stem + f'_pred{suffix}.tif')
+        png_dst_path = Path(src_path.stem + f'_pred{suffix}.png')
         
-        predict_image(src_path, tiff_dst_path, size, model)
+        predict_image_unet(src_path, tiff_dst_path, size, model)
         
         image = load_image(src_path)
         label = load_label(tiff_dst_path)
@@ -1053,32 +1163,31 @@ names=info['name']
 colors=info['color']
 cmap=mpl.colors.ListedColormap(info['color'])
 
-# %%
-# Display the training data
-for image, label, path in zip(images, label_images, train_x_paths):
-    path = Path(path)
-    display_image_and_label(image, label, cmap, names, rgb, path.stem)
-    plt.savefig(path.with_suffix('.png').name)
+# # Display the training data
+# for image, label, path in zip(images, label_images, train_x_paths):
+#     path = Path(path)
+#     display_image_and_label(image, label, cmap, names, rgb, path.stem)
+#     plt.savefig(path.with_suffix('.png').name)
     
 
 # %%
-# # CREATE DATASETS AND DATALOADERS
+# CREATE DATASETS AND DATALOADERS
 
-# # Patch Dataset All Channels
-# patch_size = 15
-# patch_dataset = ConcatDataset([
-#     PatchDataset(image, label_image, patch_size)
-#     for image, label_image in zip(images, label_images)
-# ])
-# patch_dataset_train, patch_dataset_val, patch_dataset_test = split_dataset(
-#     patch_dataset, train_size=0.7, test_size=0.15, seed=random_state
-# )
-# patch_dataset_train_aug = AugmentedDataset(patch_dataset_train, flip_and_rotate)
+# Patch Dataset All Channels
+patch_size = 15
+patch_dataset = ConcatDataset([
+    PatchDatasetPostPad(image, label_image, patch_size)
+    for image, label_image in zip(images, label_images)
+])
+patch_dataset_train, patch_dataset_val, patch_dataset_test = split_dataset(
+    patch_dataset, train_size=0.7, test_size=0.15, seed=random_state
+)
+patch_dataset_train_aug = AugmentedDataset(patch_dataset_train, flip_and_rotate)
 
-# patch_loader_train = DataLoader(patch_dataset_train, batch_size=64, shuffle=True, num_workers=8)
-# patch_loader_train_aug = DataLoader(patch_dataset_train_aug, batch_size=64, shuffle=True, num_workers=8)
-# patch_loader_val = DataLoader(patch_dataset_val, batch_size=64, num_workers=8)
-# patch_loader_test = DataLoader(patch_dataset_test, batch_size=64, num_workers=8)
+patch_loader_train = DataLoader(patch_dataset_train, batch_size=64, shuffle=True, num_workers=8)
+patch_loader_train_aug = DataLoader(patch_dataset_train_aug, batch_size=64, shuffle=True, num_workers=8)
+patch_loader_val = DataLoader(patch_dataset_val, batch_size=64, num_workers=8)
+patch_loader_test = DataLoader(patch_dataset_test, batch_size=64, num_workers=8)
 
 # fig, axs = plt.subplots(nrows=5, figsize=(4, 5))
 # for ax in axs.flat:
@@ -1130,7 +1239,7 @@ for image, label, path in zip(images, label_images, train_x_paths):
 # print('Training MLP...')
 # train_mlp(images, label_images, names=names[1:], random_state=random_state, epochs=500)
 # print('Training CNN...')
-# train_cnn(patch_loader_train_aug, patch_loader_val, patch_loader_test, names=names[1:], epochs=500)
+train_cnn(patch_loader_train_aug, patch_loader_val, patch_loader_test, names=names[1:], epochs=500)
 # print('Training ResNet...')
 # train_resnet(rgb_loader_train_aug, rgb_loader_val, rgb_loader_test, names=names[1:], freeze_head=False, epochs=500)
 # print('Training U-Net...')
@@ -1144,15 +1253,17 @@ for image, label, path in zip(images, label_images, train_x_paths):
 #     crop_size=62, stride=15, images=images,
 #     label_images=label_images, epochs=300, batch_size=32
 # )
-# %%
-# Evaluate on the unlabelled dataset
-ckpt_path = (
-    'unet_results_overlap/lightning_logs/'
-    'version_0/checkpoints/epoch=280-step=16860.ckpt'
-)
-model = LitUNet.load_from_checkpoint(ckpt_path)
-predict_all_images(validation_x_paths, (60, 60, 62), model, cmap, names, rgb)
 
+# # Evaluate on the unlabelled dataset
+# ckpt_path = (
+#     'unet_results_overlap/lightning_logs/'
+#     'version_0/checkpoints/epoch=280-step=16860.ckpt'
+# )
+# model = LitUNet.load_from_checkpoint(ckpt_path)
+# predict_all_images_unet(
+#     paths=validation_x_paths, sizes=(60, 60, 62),
+#     model=model, cmap=cmap, names=names, rgb=rgb
+# )
 
 ##########################################################
 # COMMENTARY
@@ -1181,5 +1292,12 @@ predict_all_images(validation_x_paths, (60, 60, 62), model, cmap, names, rgb)
 
 # Of all the models, only the segmentation model with no overlap
 # is the one that it test somewhat realistically.
+
+# %%
+# ckpt_path = (
+#     'colab_results/colab_logs/cnn_results/lightning_logs/'
+#     'version_0/checkpoints/epoch=28-step=10237.ckpt'
+# )
+# model = LitCNN.load_from_checkpoint(ckpt_path)
 
 # %%
