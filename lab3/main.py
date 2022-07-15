@@ -658,17 +658,29 @@ def flip_and_rotate(*tensors):
 ##########################################################
 # PLOTTING FUNCTIONS
 ##########################################################
-
-def plot_samples(images, names, rgb):
-    fig, axs = plt.subplots(len(images), figsize=(12, 8))
-    for image, name, ax in zip(images, names, axs.flat):
-        image = image[rgb, ...]
-        image = image.transpose((1,2,0))
-        image = image / image.max()
-        ax.imshow(image)
-        ax.axis('off')
-        ax.set_title(name)
-    return fig, axs
+def display_image_and_label(
+    image, label, cmap, classnames, rgb,
+    title=None, axs=None,
+):
+    if axs is None:
+        fig, axs = plt.subplots(nrows=2, figsize=(16, 6))
+    image = image[rgb, ...].transpose(1, 2, 0)
+    image = image / image.max()
+    axs[0].imshow(image)
+    axs[1].imshow(label, cmap=cmap)
+    axs[0].set_axis_off()
+    axs[1].set_axis_off()
+    
+    norm = mpl.colors.Normalize(0, cmap.N)
+    cbar = plt.gcf().colorbar(
+        mpl.cm.ScalarMappable(norm=norm, cmap=cmap),
+        ax=axs, shrink=0.9, location='right'
+    )
+    cbar.set_ticks(0.5 + np.arange(cmap.N))
+    cbar.set_ticklabels(classnames)
+    plt.suptitle(title)
+    
+    return axs
 
 
 def display_patch(dataset, idx, rgb, ax=None):
@@ -708,26 +720,6 @@ def display_segmentation(dataset, idx, cmap, names, rgb, n_repeats=1, axs=None):
     
     return axgrid
 
-
-def display_predictions(image, pred_label, cmap, names, rgb, axs=None):
-    if axs is None:
-        fig, axs = plt.subplots(nrows=2, figsize=(16, 6))
-    image = image[rgb, ...].transpose(1, 2, 0)
-    image = image / image.max()
-    axs[0].imshow(image)
-    axs[1].imshow(pred_label, cmap=cmap)
-    axs[0].set_axis_off()
-    axs[1].set_axis_off()
-    
-    norm = mpl.colors.Normalize(0, cmap.N)
-    cbar = plt.gcf().colorbar(
-        mpl.cm.ScalarMappable(norm=norm, cmap=cmap),
-        ax=axs, shrink=0.9, location='right'
-    )
-    cbar.set_ticks(0.5 + np.arange(cmap.N))
-    cbar.set_ticklabels(names)
-    
-    return axs
 
 ##########################################################
 # UTILITY FUNCTIONS
@@ -1001,7 +993,7 @@ def predict_image(src_path, dst_path, size, model):
         height=dataset.img_h,
         count=1,
         dtype=rasterio.uint8,
-        driver='Gtif',
+        driver='Gtiff',
     ) as dst:
         for idx, x in enumerate(loader):
             logits = model(x)
@@ -1019,14 +1011,15 @@ def predict_all_images(
     cmap, names, rgb
 ):
     for src_path, size in zip(validation_x_paths, sizes):
-        tiff_dst_path = src_path.rsplit('.', 1)[0] + '_pred.tif'
-        png_dst_path = src_path.rsplit('.', 1)[0] + '_pred.png'
+        src_path = Path(src_path)
+        tiff_dst_path = Path(src_path.stem + '_pred.tif')
+        png_dst_path = Path(src_path.stem + '_pred.png')
         
         predict_image(src_path, tiff_dst_path, size, model)
         
         image = load_image(src_path)
         label = load_label(tiff_dst_path)
-        display_predictions(image, label, cmap, names, rgb)
+        display_image_and_label(image, label, cmap, names, rgb, src_path.stem)
         
         plt.savefig(png_dst_path)
         
@@ -1058,7 +1051,15 @@ names=info['name']
 colors=info['color']
 cmap=mpl.colors.ListedColormap(info['color'])
 
+# %%
+# Display the training data
+for image, label, path in zip(images, label_images, train_x_paths):
+    path = Path(path)
+    display_image_and_label(image, label, cmap, names, rgb, path.stem)
+    plt.savefig(path.with_suffix('.png').name)
+    
 
+# %%
 # # CREATE DATASETS AND DATALOADERS
 
 # # Patch Dataset All Channels
@@ -1100,19 +1101,19 @@ cmap=mpl.colors.ListedColormap(info['color'])
 
 
 # # Cropped Dataset
-# 62*4 = 248 < 249 and 250, the heights of the images
-stride = 62
-crop_size = 62
-cropped_dataset = ConcatDataset([
-    CroppedDataset(image, label_image, crop_size=crop_size, stride=stride)  
-    for image, label_image in zip(images, label_images)
-])
-cropped_dataset_train, cropped_dataset_val, cropped_dataset_test = split_dataset(
-    cropped_dataset, train_size=0.7, test_size=0.15, seed=random_state
-)
-cropped_dataset_train_aug = AugmentedDataset(
-    cropped_dataset_train, transform=flip_and_rotate, apply_on_target=True
-)
+# # 62*4 = 248 < 249 and 250, the heights of the images
+# stride = 62
+# crop_size = 62
+# cropped_dataset = ConcatDataset([
+#     CroppedDataset(image, label_image, crop_size=crop_size, stride=stride)  
+#     for image, label_image in zip(images, label_images)
+# ])
+# cropped_dataset_train, cropped_dataset_val, cropped_dataset_test = split_dataset(
+#     cropped_dataset, train_size=0.7, test_size=0.15, seed=random_state
+# )
+# cropped_dataset_train_aug = AugmentedDataset(
+#     cropped_dataset_train, transform=flip_and_rotate, apply_on_target=True
+# )
 
 # # Use batch_size=2 when running locally
 # cropped_loader_train_aug = DataLoader(cropped_dataset_train_aug, batch_size=16, shuffle=True, num_workers=0)
@@ -1135,24 +1136,22 @@ cropped_dataset_train_aug = AugmentedDataset(
 # print('Finished!')
 
 
-# %%
-# Train U-Net with overlap on the entire dataset
-# to use it for the final estimation.
-train_unet_overlap(
-    crop_size=62, stride=15, images=images, label_images=label_images
-)
+# # Train U-Net with overlap on the entire dataset
+# # to use it for the final estimation.
+# train_unet_overlap(
+#     crop_size=62, stride=15, images=images, label_images=label_images
+# )
 
 # %%
 # Evaluate on the unlabelled dataset
-ckpt_path = ('colab_results/colab_logs/unet_results/lightning_logs/'
-             'version_0/checkpoints/epoch=302-step=2121.ckpt')
+ckpt_path = (
+    'unet_results_overlap/lightning_logs/'
+    'version_0/checkpoints/epoch=280-step=16860.ckpt'
+)
 model = LitUNet.load_from_checkpoint(ckpt_path)
 predict_all_images(validation_x_paths, (60, 60, 62), model, cmap, names, rgb)
 
 
-
-    
-    
 ##########################################################
 # COMMENTARY
 ##########################################################
