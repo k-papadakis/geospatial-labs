@@ -30,6 +30,7 @@ from torchsummary import summary
 import torchvision.transforms.functional as TF 
 from torchvision.models import resnet18
 
+from unet import UNet as PremadeUnet
 
 ##########################################################
 # PYTORCH DATASETS
@@ -570,7 +571,7 @@ class LitUNet(pl.LightningModule):
     
     def __init__(self, n_channels, n_classes, ignore_index=None, lr=1e-4):
         super().__init__()
-        self.unet = UNet(n_channels, n_classes)
+        self.unet = PremadeUnet(n_channels, n_classes) # UNet(n_channels, n_classes)
         self.lr = lr
         
         # TODO: Dice loss is consistently about 1/10 lower than in the other models. Bug?
@@ -943,7 +944,9 @@ def evaluate_model(trainer, dataset_test, names, ignore_index=None):
         display_labels=names,
     ).plot(xticks_rotation=90, ax=ax, colorbar=False)
     ax.set_title(title)
-    plt.savefig(f'{title}.png')
+    output_dir = Path('output')
+    output_dir.mkdir(exist_ok=True)
+    plt.savefig(output_dir / f'{title}.png')
     return ax
     
 
@@ -976,8 +979,9 @@ def train_traditional(images, label_images, names, random_state=None):
         print('-'*70)
     
     axs[1].set_yticks([])
-    
-    plt.savefig('traditional.png')
+    output_dir = Path('output')
+    output_dir.mkdir(exist_ok=True)
+    plt.savefig(output_dir / 'traditional.png')
     return axs
     
     
@@ -1317,6 +1321,8 @@ print('\nFinished!')
 #     label_images=label_images, epochs=300, batch_size=32
 # )
 
+# %%
+# Evaluate on the unlabelled dataset
 ckpt_path_cnn = (
     'cnn_results/lightning_logs/version_0/checkpoints/epoch=1-step=5868.ckpt'
 )
@@ -1327,7 +1333,6 @@ predict_all_images_cnn(
     cmap=cmap, classnames=names, rgb=rgb,
 )
 
-# Evaluate on the unlabelled dataset
 ckpt_path_unet = (
     'unet_results_overlap/lightning_logs/'
     'version_0/checkpoints/epoch=280-step=16860.ckpt'
@@ -1366,3 +1371,5 @@ predict_all_images_unet(
 # Of all the models, only the segmentation model with no overlap
 # is the one that it test somewhat realistically.
 
+
+# %%

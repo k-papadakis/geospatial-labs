@@ -3,3 +3,4 @@ env
 lightning_logs
 data/
 .vscode
+__pycache__/
