@@ -1,6 +1,8 @@
 env
 *.tif
+*.pt
 lightning_logs
 data/
 .vscode
 __pycache__/
+output/

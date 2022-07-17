@@ -30,8 +30,6 @@ from torchsummary import summary
 import torchvision.transforms.functional as TF 
 from torchvision.models import resnet18
 
-from unet import UNet as PremadeUnet
-
 ##########################################################
 # PYTORCH DATASETS
 ##########################################################
@@ -571,7 +569,7 @@ class LitUNet(pl.LightningModule):
     
     def __init__(self, n_channels, n_classes, ignore_index=None, lr=1e-4):
         super().__init__()
-        self.unet = PremadeUnet(n_channels, n_classes) # UNet(n_channels, n_classes)
+        self.unet = UNet(n_channels, n_classes)
         self.lr = lr
         
         # TODO: Dice loss is consistently about 1/10 lower than in the other models. Bug?
@@ -774,6 +772,7 @@ def flip_and_rotate(*tensors):
 ##########################################################
 # PLOTTING FUNCTIONS
 ##########################################################
+
 def display_image_and_label(
     image, label, cmap, classnames, rgb,
     title=None, axs=None,
@@ -915,6 +914,61 @@ def make_pixel_dataset(images, label_images):
     return x, y
 
 
+def test_cropped_dataset(
+    src_path='HyRANK_satellite/ValidationSet/Erato.tif',
+    size=60,
+    rgb=(23, 11, 7),
+):
+    
+    # Load from disk
+    src_path = Path(src_path)
+    dst_path = Path(f'{src_path.stem}_reconstructed.tif')
+    with rasterio.open(src_path) as src:
+        image = src.read()
+            
+    dataset = CroppedDataset(image, None, size, size)
+    loader = DataLoader(dataset)
+    
+    # Write to disk
+    with rasterio.open(
+        dst_path, 'w',
+        height=dataset.image.shape[-2],
+        width=dataset.image.shape[-1],
+        count=image.shape[0],
+        dtype=image.dtype,
+        driver='Gtiff',
+    ) as dst:
+        for idx, x in enumerate(loader):
+            if idx % 5 == 0:
+                continue
+            min_i, min_j, max_i, max_j = dataset.get_bounds(idx)
+            window = rasterio.windows.Window.from_slices(
+                (min_i, max_i), (min_j, max_j)
+            )
+            dst.write(x[0], window=window)
+            
+    fig, axs = plt.subplots(nrows=2, figsize=(16, 9))
+    
+    image = image[rgb, ...].transpose(1, 2, 0)
+    image = image / image.max()
+    axs[0].imshow(image)
+    axs[0].set_axis_off()
+    del image
+    
+    recon = load_image(dst_path)
+    recon = recon[rgb, ...].transpose(1, 2, 0)
+    recon = recon / recon.max()
+    axs[1].imshow(recon)
+    axs[1].set_axis_off()
+    
+    fig.tight_layout()
+    plt.show()
+            
+
+test_cropped_dataset()
+
+
+# %%
 ##########################################################
 # MODEL TRAINING FUNCTIONS (Hardcoded)
 ##########################################################
@@ -1231,6 +1285,7 @@ names = info['name']
 colors = info['color']
 cmap = mpl.colors.ListedColormap(info['color'])
 
+# %%
 # Display the training data
 output_dir = Path('output')
 output_dir.mkdir(exist_ok=True)
@@ -1295,12 +1350,12 @@ cropped_dataset_train_aug = AugmentedDataset(
 )
 
 # Use batch_size=2 when running locally
-cropped_loader_train_aug = DataLoader(cropped_dataset_train_aug, batch_size=32, shuffle=True, num_workers=2)
-cropped_loader_val = DataLoader(cropped_dataset_val, batch_size=32, num_workers=2)
-cropped_loader_test = DataLoader(cropped_dataset_test, batch_size=32, num_workers=2)
+cropped_loader_train_aug = DataLoader(cropped_dataset_train_aug, batch_size=16, shuffle=True, num_workers=2)
+cropped_loader_val = DataLoader(cropped_dataset_val, batch_size=16, num_workers=2)
+cropped_loader_test = DataLoader(cropped_dataset_test, batch_size=16, num_workers=2)
 
 display_segmentation(cropped_dataset_train_aug, 80, cmap=cmap, names=names, rgb=rgb, n_repeats=5)
-
+    
     
 print('\nTraining Random Forest and SVM...')
 train_traditional(images, label_images, names=names[1:], random_state=random_state)
@@ -1333,9 +1388,9 @@ predict_all_images_cnn(
     cmap=cmap, classnames=names, rgb=rgb,
 )
 
+# %%
 ckpt_path_unet = (
-    'unet_results_overlap/lightning_logs/'
-    'version_0/checkpoints/epoch=280-step=16860.ckpt'
+    'unet_results/lightning_logs/version_2/checkpoints/epoch=18-step=76.ckpt'
 )
 model = LitUNet.load_from_checkpoint(ckpt_path_unet)
 predict_all_images_unet(
