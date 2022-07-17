@@ -235,11 +235,11 @@ class CroppedDataset(Dataset):
         if self.labels is not None:
           y = self.labels[min_i : max_i, min_j : max_j]
           y = torch.tensor(y, dtype=torch.int64)
-          if self.transform:
+          if self.transform is not None:
             x, y = self.transform(x, y)
           return x, y
         else:
-          if self.transform:
+          if self.transform is not None:
             x = self.transform(x)
           return x
 
@@ -965,9 +965,6 @@ def test_cropped_dataset(
     plt.show()
             
 
-test_cropped_dataset()
-
-
 # %%
 ##########################################################
 # MODEL TRAINING FUNCTIONS (Hardcoded)
@@ -1056,7 +1053,7 @@ def train_mlp(images, label_images, names, epochs=50, random_state=None):
     
     callbacks = [
         # EarlyStopping(monitor='accuracy/val', mode='max', patience=10),
-        ModelCheckpoint(monitor='accuracy/val', mode='max', save_last=True),
+        ModelCheckpoint(monitor='loss/val', mode='min', save_last=True),
     ]
     trainer = pl.Trainer(
         max_epochs=epochs,
@@ -1074,7 +1071,7 @@ def train_cnn(loader_train, loader_val, loader_test, names, epochs=50):
     cnn = LitCNN(176, 14, lr=1e-3)
     callbacks = [
         # EarlyStopping(monitor='accuracy/val', mode='max', patience=10),
-        ModelCheckpoint(monitor='accuracy/val', mode='max', save_last=True)
+        ModelCheckpoint(monitor='loss/val', mode='min', save_last=True)
     ]
     trainer = pl.Trainer(
         accelerator='gpu', 
@@ -1092,7 +1089,7 @@ def train_resnet(loader_train, loader_val, loader_test, names, freeze_head=False
     
     callbacks = [
         # EarlyStopping(monitor='accuracy/val', mode='max', patience=10),
-        ModelCheckpoint(monitor='accuracy/val', mode='max', save_last=True),
+        ModelCheckpoint(monitor='loss/val', mode='min', save_last=True),
     ]
     trainer = pl.Trainer(
         max_epochs=epochs,
@@ -1105,11 +1102,11 @@ def train_resnet(loader_train, loader_val, loader_test, names, freeze_head=False
      
     
 def train_unet(loader_train, loader_val, loader_test, names, epochs):
-    model = LitUNet(176, 15, ignore_index=0, lr=1e-4)
+    model = LitUNet(176, 14, ignore_index=-1, lr=1e-4)
     callbacks = [
         # Too much variance due sample size variability due to label exclusion
         # EarlyStopping(monitor='accuracy/val', mode='max', patience=10),
-        ModelCheckpoint(monitor='accuracy/val', mode='max', save_last=False),
+        ModelCheckpoint(monitor='loss/val', mode='min', save_last=False),
     ]
     trainer = pl.Trainer(
         accelerator='gpu', 
@@ -1284,6 +1281,7 @@ info = read_info(info_path)
 names = info['name']
 colors = info['color']
 cmap = mpl.colors.ListedColormap(info['color'])
+norm = mpl.colors.BoundaryNorm(np.arange(-1, 14+1), ncolors=15)
 
 # %%
 # Display the training data
@@ -1382,7 +1380,7 @@ ckpt_path_cnn = (
     'cnn_results/lightning_logs/version_0/checkpoints/epoch=1-step=5868.ckpt'
 )
 model = LitCNN.load_from_checkpoint(ckpt_path_cnn)
- 
+model.eval()
 predict_all_images_cnn(
     paths=validation_x_paths, model=model, batch_size=64,
     cmap=cmap, classnames=names, rgb=rgb,
@@ -1390,7 +1388,7 @@ predict_all_images_cnn(
 
 # %%
 ckpt_path_unet = (
-    'unet_results/lightning_logs/version_2/checkpoints/epoch=18-step=76.ckpt'
+    '/home/konstantinos/projects/geospatial-labs/lab3/colab_results/unet_results_overlap/lightning_logs/version_0/checkpoints/epoch=280-step=16860.ckpt'
 )
 model = LitUNet.load_from_checkpoint(ckpt_path_unet)
 predict_all_images_unet(
