@@ -612,13 +612,13 @@ class LitUNet(pl.LightningModule):
         
         self.cross_entropy = nn.CrossEntropyLoss(ignore_index=ignore_index)
         
-        self.train_accuracy = torchmetrics.Accuracy(ignore_index=ignore_index, mdmc_average='global')
-        self.val_accuracy = torchmetrics.Accuracy(ignore_index=ignore_index, mdmc_average='global')
-        self.test_accuracy = torchmetrics.Accuracy(ignore_index=ignore_index, mdmc_average='global')
+        # self.train_accuracy = torchmetrics.Accuracy(ignore_index=ignore_index, mdmc_average='global')
+        # self.val_accuracy = torchmetrics.Accuracy(ignore_index=ignore_index, mdmc_average='global')
+        # self.test_accuracy = torchmetrics.Accuracy(ignore_index=ignore_index, mdmc_average='global')
         
-        self.train_dice = torchmetrics.Dice(ignore_index=ignore_index, mdmc_average='global')
-        self.val_dice = torchmetrics.Dice(ignore_index=ignore_index, mdmc_average='global')
-        self.test_dice = torchmetrics.Dice(ignore_index=ignore_index, mdmc_average='global')
+        # self.train_dice = torchmetrics.Dice(ignore_index=ignore_index, mdmc_average='global')
+        # self.val_dice = torchmetrics.Dice(ignore_index=ignore_index, mdmc_average='global')
+        # self.test_dice = torchmetrics.Dice(ignore_index=ignore_index, mdmc_average='global')
         
         # TODO: Implement a custom ConfusionMatrix metrix to work with ignore_index
         # self.train_confusion_matrix = torchmetrics.ConfusionMatrix(n_classes)
@@ -643,11 +643,11 @@ class LitUNet(pl.LightningModule):
         loss = self.cross_entropy(logits, y)
         self.log('loss/train', loss, on_epoch=True, on_step=False)
         
-        self.train_accuracy(logits, y)
-        self.log('accuracy/train', self.train_accuracy, on_epoch=True, on_step=False)
+        # self.train_accuracy(logits, y)
+        # self.log('accuracy/train', self.train_accuracy, on_epoch=True, on_step=False)
         
-        self.train_dice(logits, y)
-        self.log('dice/train', self.train_dice, on_epoch=True, on_step=False)
+        # self.train_dice(logits, y)
+        # self.log('dice/train', self.train_dice, on_epoch=True, on_step=False)
         
         # self.train_confusion_matrix(logits, y)
         
@@ -660,11 +660,11 @@ class LitUNet(pl.LightningModule):
         loss = self.cross_entropy(logits, y)
         self.log('loss/val', loss, on_epoch=True, on_step=False)
         
-        self.val_accuracy(logits, y)
-        self.log('accuracy/val', self.val_accuracy, on_epoch=True, on_step=False)
+        # self.val_accuracy(logits, y)
+        # self.log('accuracy/val', self.val_accuracy, on_epoch=True, on_step=False)
         
-        self.val_dice(logits, y)
-        self.log('dice/val', self.val_dice, on_epoch=True, on_step=False)
+        # self.val_dice(logits, y)
+        # self.log('dice/val', self.val_dice, on_epoch=True, on_step=False)
         
         # self.val_confusion_matrix(logits, y)
                 
@@ -672,14 +672,14 @@ class LitUNet(pl.LightningModule):
         optimizer = torch.optim.Adam(self.parameters(), lr=self.lr)
         return optimizer
     
-    def test_step(self, batch, batch_idx):
-        x, y = batch
-        logits = self(x)
+    # def test_step(self, batch, batch_idx):
+    #     x, y = batch
+    #     logits = self(x)
         
-        loss = self.cross_entropy(logits, y)
-        self.test_accuracy(logits, y)
-        self.test_dice(logits, y)
-        # self.test_confusion_matrix(logits, y)
+    #     loss = self.cross_entropy(logits, y)
+    #     self.test_accuracy(logits, y)
+    #     self.test_dice(logits, y)
+    #     self.test_confusion_matrix(logits, y)
 
 
 class TransferResNet(pl.LightningModule):
@@ -811,7 +811,7 @@ def flip_and_rotate(*tensors):
 ##########################################################
 
 def display_image_and_label(
-    image, label, cmap, classnames, rgb,
+    image, label, cmap, norm, classnames, rgb,
     title=None, axs=None,
 ):
     if axs is None:
@@ -819,11 +819,10 @@ def display_image_and_label(
     image = image[rgb, ...].transpose(1, 2, 0)
     image = image / image.max()
     axs[0].imshow(image)
-    axs[1].imshow(label, cmap=cmap)
+    axs[1].imshow(label, cmap=cmap, norm=norm)
     axs[0].set_axis_off()
     axs[1].set_axis_off()
     
-    norm = mpl.colors.Normalize(0, cmap.N)
     cbar = plt.gcf().colorbar(
         mpl.cm.ScalarMappable(norm=norm, cmap=cmap),
         ax=axs, shrink=0.9, location='right'
@@ -847,7 +846,7 @@ def display_patch(dataset, idx, rgb, ax=None):
     return ax
 
 
-def display_segmentation(dataset, idx, cmap, names, rgb, n_repeats=1, axs=None):
+def display_segmentation(dataset, idx, cmap, norm, names, rgb, n_repeats=1, axs=None):
     if axs is None:
         fig, axgrid = plt.subplots(nrows=n_repeats, ncols=2, figsize= (4, n_repeats))
         
@@ -858,11 +857,10 @@ def display_segmentation(dataset, idx, cmap, names, rgb, n_repeats=1, axs=None):
     
     for ax1, ax2 in axgrid:
         ax1.imshow(img)
-        ax2.imshow(label, cmap=cmap)
+        ax2.imshow(label, cmap=cmap, norm=norm)
         ax1.set_axis_off()
         ax2.set_axis_off()
     
-    norm = mpl.colors.Normalize(0, cmap.N)
     cbar = plt.gcf().colorbar(
         mpl.cm.ScalarMappable(norm=norm, cmap=cmap),
         ax=axgrid, shrink=0.9, location='right'
@@ -964,7 +962,9 @@ def test_cropped_dataset(
     with rasterio.open(src_path) as src:
         image = src.read()
             
-    dataset = CroppedDataset(image, None, size, stride, use_padding=use_padding)
+    dataset = CroppedDataset(
+        image, None, size, stride, use_padding=use_padding
+    )
     loader = DataLoader(dataset)
     
     # Write to disk
@@ -1003,9 +1003,6 @@ def test_cropped_dataset(
     plt.show()
 
 
-test_cropped_dataset()   
-
-# %%
 ##########################################################
 # MODEL TRAINING FUNCTIONS (Hardcoded)
 ##########################################################
@@ -1157,21 +1154,19 @@ def train_unet(loader_train, loader_val, loader_test, names, epochs):
     )
     trainer.fit(model, train_dataloaders=loader_train, val_dataloaders=loader_val)
 
-    evaluate_model(trainer, loader_test, names, ignore_index=0)
+    evaluate_model(trainer, loader_test, names, ignore_index=-1)
 
 
 def train_unet_overlap(
     crop_size, stride, images, label_images, batch_size, epochs
 ):
     dataset = ConcatDataset([
-        CroppedDataset(image, label_image, stride=stride, crop_size=crop_size)
+        CroppedDataset(
+            image, label_image, stride=stride,
+            crop_size=crop_size, use_padding=True,
+        )
         for image, label_image in zip(images, label_images)
     ])
-
-    # Print max bounds and number of images
-    for ds in dataset.datasets:
-        print(ds.img_h, ds.img_w, ds.get_bounds(len(ds) - 1)[-2:])
-        print(len(ds))
 
     dataset = AugmentedDataset(
         dataset, transform=flip_and_rotate, apply_on_target=True
@@ -1179,7 +1174,7 @@ def train_unet_overlap(
 
     loader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
 
-    model = LitUNet(176, 15, ignore_index=0, lr=1e-4)
+    model = LitUNet(176, 14, ignore_index=-1, lr=1e-4)
     callbacks = [
         ModelCheckpoint(monitor='loss/train', mode='min', save_last=False),
     ]
@@ -1201,8 +1196,25 @@ def train_unet_overlap(
 def predict_image_unet(src_path, dst_path, size, model):
     # Load from disk
     image = load_image(src_path)
-    dataset = CroppedDataset(image, None, size, size)
+    dataset = CroppedDataset(image, None, size, size, use_padding=True)
     loader = DataLoader(dataset)
+    height = dataset.image.shape[-2]
+    width = dataset.image.shape[-1]
+    pred_image = np.full((1, height, width), -1, dtype=np.int64)
+    model.eval()
+    
+    for idx, x in enumerate(loader):
+        logits = model(x)
+        pred_patch = torch.argmax(logits, 1).numpy()
+        min_i, min_j, max_i, max_j = dataset.get_bounds(idx)
+        pred_image[0, min_i:max_i, min_j:max_j] = pred_patch
+    
+    p = dataset.padding
+    s = (
+        slice(p[0][0], -p[0][1] if p[0][1] > 0 else None),
+        slice(p[1][0], -p[1][1] if p[1][1] > 0 else None)
+    )
+    pred_image = pred_image[:, s[0], s[1]]
     
     # Write to disk
     with rasterio.open(
@@ -1213,26 +1225,18 @@ def predict_image_unet(src_path, dst_path, size, model):
         dtype=rasterio.uint8,
         driver='Gtiff',
     ) as dst:
-        for idx, x in enumerate(loader):
-            logits = model(x)
-            preds = torch.argmax(logits, 1)
-            preds = preds.numpy().astype(rasterio.uint8)
-            min_i, min_j, max_i, max_j = dataset.get_bounds(idx)
-            window = rasterio.windows.Window.from_slices(
-                (min_i, max_i), (min_j, max_j)
-            )
-            dst.write(preds, window=window)
+        dst.write((pred_image + 1).astype(rasterio.uint8))
+            
 
 
 def predict_all_images_unet(
-    paths, sizes, model,
-    cmap, classnames, rgb, suffix='_unet'
+    paths, size, model,
+    cmap, norm, classnames, rgb, suffix='_unet'
 ):
-    
     output_dir = Path('output')
     output_dir.mkdir(exist_ok=True)
     
-    for src_path, size in zip(paths, sizes):
+    for src_path in paths:
         src_path = Path(src_path)
         tiff_dst_path = output_dir / Path(src_path.stem + f'_pred{suffix}.tif')
         png_dst_path = output_dir / Path(src_path.stem + f'_pred{suffix}.png')
@@ -1242,7 +1246,8 @@ def predict_all_images_unet(
         image = load_image(src_path)
         label = load_label(tiff_dst_path)
         display_image_and_label(
-            image=image, label=label, cmap=cmap, classnames=classnames,
+            image=image, label=label,
+            cmap=cmap, norm=norm, classnames=classnames,
             rgb=rgb, title=src_path.stem + suffix
         )
         
@@ -1275,7 +1280,7 @@ def predict_image_cnn(src_path, dst_path, model, batch_size, patch_size=15):
         
 def predict_all_images_cnn(
     paths, model, batch_size,
-    cmap, classnames, rgb, suffix='_cnn'
+    cmap, norm, classnames, rgb, suffix='_cnn'
 ):
     output_dir = Path('output')
     output_dir.mkdir(exist_ok=True)
@@ -1290,12 +1295,15 @@ def predict_all_images_cnn(
         image = load_image(src_path)
         label = load_label(tiff_dst_path)
         display_image_and_label(
-            image=image, label=label, cmap=cmap, classnames=classnames,
+            image=image, label=label, cmap=cmap, norm=norm, classnames=classnames,
             rgb=rgb, title=src_path.stem + suffix
         )
         
         plt.savefig(png_dst_path)
 
+def predict_all_images_mlp():
+    # TODO
+    pass
 # %%
 # if __name__ == '__main__':
 random_state = 42
@@ -1330,7 +1338,10 @@ output_dir = Path('output')
 output_dir.mkdir(exist_ok=True)
 for image, label, path in zip(images, label_images, train_x_paths):
     path = Path(path)
-    display_image_and_label(image, label, cmap, names, rgb, path.stem)
+    display_image_and_label(
+        image=image, label=label,
+        cmap=cmap, norm=norm, names=names, rgb=rgb, title=path.stem,
+    )
     plt.savefig(output_dir / path.with_suffix('.png').name)
 
 # %%
@@ -1374,11 +1385,13 @@ rgb_loader_test = DataLoader(rgb_dataset_test, batch_size=256, num_workers=2)
 
 
 # Cropped Dataset
-# 62*4 = 248 < 249 and 250, the heights of the images
-stride = 62
-crop_size = 62
+stride = 64
+crop_size = 64
 cropped_dataset = ConcatDataset([
-    CroppedDataset(image, label_image, crop_size=crop_size, stride=stride)  
+    CroppedDataset(
+        image, label_image, crop_size=crop_size,
+        stride=stride, use_padding=True,
+    )  
     for image, label_image in zip(images, label_images)
 ])
 cropped_dataset_train, cropped_dataset_val, cropped_dataset_test = split_dataset(
@@ -1393,7 +1406,7 @@ cropped_loader_train_aug = DataLoader(cropped_dataset_train_aug, batch_size=16, 
 cropped_loader_val = DataLoader(cropped_dataset_val, batch_size=16, num_workers=2)
 cropped_loader_test = DataLoader(cropped_dataset_test, batch_size=16, num_workers=2)
 
-display_segmentation(cropped_dataset_train_aug, 80, cmap=cmap, names=names, rgb=rgb, n_repeats=5)
+display_segmentation(cropped_dataset_train_aug, 80, cmap=cmap, norm=norm, names=names, rgb=rgb, n_repeats=5)
     
     
 print('\nTraining Random Forest and SVM...')
@@ -1411,8 +1424,8 @@ print('\nFinished!')
 # # Train U-Net with overlap on the entire dataset
 # # to use it for the final estimation.
 # train_unet_overlap(
-#     crop_size=62, stride=15, images=images,
-#     label_images=label_images, epochs=300, batch_size=32
+#     crop_size=64, stride=32, images=images,
+#     label_images=label_images, epochs=20, batch_size=16,
 # )
 
 # %%
@@ -1424,17 +1437,18 @@ model = LitCNN.load_from_checkpoint(ckpt_path_cnn)
 model.eval()
 predict_all_images_cnn(
     paths=validation_x_paths, model=model, batch_size=64,
-    cmap=cmap, classnames=names, rgb=rgb,
+    cmap=cmap, norm=norm, classnames=names, rgb=rgb,
 )
 
 # %%
 ckpt_path_unet = (
-    '/home/konstantinos/projects/geospatial-labs/lab3/colab_results/unet_results_overlap/lightning_logs/version_0/checkpoints/epoch=280-step=16860.ckpt'
+    'unet_results_overlap/lightning_logs/version_0/checkpoints/epoch=19-step=640.ckpt'
 )
 model = LitUNet.load_from_checkpoint(ckpt_path_unet)
+model.eval()
 predict_all_images_unet(
-    paths=validation_x_paths, sizes=(60, 60, 62),
-    model=model, cmap=cmap, classnames=names, rgb=rgb
+    paths=validation_x_paths, size=64,
+    model=model, cmap=cmap, norm=norm, classnames=names, rgb=rgb
 )
 
 ##########################################################
