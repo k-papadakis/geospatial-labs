@@ -40,21 +40,23 @@ class PatchDatasetNoPad(Dataset):
     Instead, ignore pixels whose patch doesn't lie inside the image.
     """
     
-    def __init__(self, image, label_image, patch_size, channels=None, transform=None):
+    def __init__(
+        self, image, label_image, patch_size,
+        channels=None, transform=None, ignore_index=-1,
+    ):
         super().__init__()
         
         self.image = image
         self.channels = channels if channels is not None else slice(None)
+        self.ignore_index = ignore_index
             
         # Keep only the pixels that are labelled and whose patch lies inside the image 
         r = patch_size // 2
         is_inner = np.full(image.shape[-2:], False, bool)
         is_inner[r:-r, r:-r] = True
         if label_image is not None:
-            self.indices = np.nonzero((label_image != 0) & is_inner)
+            self.indices = np.nonzero((label_image != self.ignore_index) & is_inner)
             self.labels = label_image[self.indices]
-            # Remap labels 1..14 --> 0..13
-            self.labels = self.labels - 1
         else:
             self.indices = np.nonzero(is_inner)
             self.labels = None
@@ -87,21 +89,23 @@ class PatchDatasetPrePad(Dataset):
     Pads the entire image before slicing. Results in uneven padding
     """
     
-    def __init__(self, image, label_image, patch_size, channels=None, transform=None):
+    def __init__(
+        self, image, label_image, patch_size,
+        channels=None, transform=None, ignore_index=-1,
+    ):
         super().__init__()
         
         self.transform = transform
         self.channels = channels if channels is not None else slice(None)
+        self.ignore_index = ignore_index
         self.patch_size = patch_size
         r = patch_size // 2
         self.padded_image = np.pad(image, ((0,0), (r,r), (r,r)))
         
         if label_image is not None:
             # Keep only the pixels that are labelled
-            self.indices = np.nonzero(label_image)
+            self.indices = np.nonzero(label_image != self.ignore_index)
             self.labels = label_image[self.indices]
-            # Remap labels 1..14 --> 0..13
-            self.labels = self.labels - 1
         else:
            self.indices = tuple(map(np.ravel, np.indices(image.shape[-2:])))
            self.labels = None
@@ -131,20 +135,22 @@ class PatchDatasetPostPad(Dataset):
     Slices a patch and then pads it equally on each side.
     """
     
-    def __init__(self, image, label_image, patch_size, channels=None, transform=None):
+    def __init__(
+        self, image, label_image, patch_size,
+        channels=None, transform=None, ignore_index=-1,
+    ):
         super().__init__()
         
         self.transform = transform
         self.channels = channels if channels is not None else slice(None)
+        self.ignore_index = ignore_index
         self.patch_size = patch_size
         self.image = image
         
         if label_image is not None:
             # Keep only the pixels that are labelled
-            self.indices = np.nonzero(label_image)
+            self.indices = np.nonzero(label_image != self.ignore_index)
             self.labels = label_image[self.indices]
-            # Remap labels 1..14 --> 0..13
-            self.labels = self.labels - 1
         else:
            self.indices = tuple(map(np.ravel, np.indices(image.shape[-2:])))
            self.labels = None
@@ -187,17 +193,18 @@ class PatchDatasetPostPad(Dataset):
 class CroppedDataset(Dataset):
     """Sliding window over an image and its label"""
     
-    def __init__(self, image, label_image,
-                 crop_size: Union[int, Tuple[int, int]],
-                 stride: Union[int, Tuple[int, int]] = 1,
-                 channels: Optional[Tuple[int, ...]] = None,
-                 transform=None,
+    def __init__(
+        self, image, label_image,
+        crop_size: Union[int, Tuple[int, int]],
+        stride: Union[int, Tuple[int, int]] = 1,
+        channels: Optional[Tuple[int, ...]] = None,
+        use_padding: Optional[bool] = False,
+        transform=None,
     ):
         super().__init__()
         
         self.image = image
-        self.img_h = self.image.shape[-2]
-        self.img_w = self.image.shape[-1]
+        self.labels = label_image
         
         if isinstance(crop_size, int):
             self.crop_h, self.crop_w = crop_size, crop_size
@@ -205,7 +212,6 @@ class CroppedDataset(Dataset):
             self.crop_h, self.crop_w = crop_size
         else:
             raise ValueError('Invalid crop_size.')
-        
         if self.crop_h > self.img_h or self.crop_w > self.img_w:
             raise ValueError('crops_size is bigger than image size.')
         
@@ -216,12 +222,27 @@ class CroppedDataset(Dataset):
         else:
             raise ValueError('Invalid stride.')
         
-        self.n_rows = 1 + (self.img_h - self.crop_h)//self.stride_h
-        self.n_cols = 1 + (self.img_w - self.crop_w)//self.stride_w
-        self.labels = label_image
-        
+        if use_padding:
+            _, _, max_i, max_j = self.get_bounds(len(self) - 1)  # exclusive
+            missed_h, missed_w = self.img_h - max_i, self.img_w - max_j
+            dh = max(0, self.stride_h - missed_h)
+            dw = max(0, self.stride_w - missed_w)
+            self.padding = (dh//2, dh - dh//2), (dw//2, dw - dw//2)
+            self.image = np.pad(
+                self.image, ((0, 0),) + self.padding,
+                'constant', constant_values=0
+            )
+            if self.labels is not None:
+                self.labels = np.pad(
+                    self.labels, self.padding,
+                    'constant', constant_values=-1
+                )
+        else:
+            self.padding = None
+            
         self.channels = channels if channels is not None else slice(None)
         self.transform = transform
+        
         
     def __len__(self):
         return self.n_rows * self.n_cols
@@ -248,6 +269,22 @@ class CroppedDataset(Dataset):
         min_i, min_j = r * self.stride_h, c * self.stride_w
         max_i, max_j = min_i + self.crop_h, min_j + self.crop_w
         return min_i, min_j, max_i, max_j
+
+    @property
+    def img_h(self):
+        return self.image.shape[-2]
+
+    @property
+    def img_w(self):
+        return self.image.shape[-1]
+
+    @property
+    def n_rows(self):
+        return 1 + (self.img_h - self.crop_h)//self.stride_h
+
+    @property
+    def n_cols(self):
+        return 1 + (self.img_w - self.crop_w)//self.stride_w
 
 
 class AugmentedDataset(Dataset):
@@ -482,7 +519,6 @@ class LitCNN(pl.LightningModule):
         return optimizer
 
 
-# %%
 # U-Net Construction
 class ConvBlock(nn.Module):
     
@@ -567,7 +603,7 @@ class UNet(nn.Module):
 
 class LitUNet(pl.LightningModule):
     
-    def __init__(self, n_channels, n_classes, ignore_index=None, lr=1e-4):
+    def __init__(self, n_channels, n_classes, ignore_index=-1, lr=1e-4):
         super().__init__()
         self.unet = UNet(n_channels, n_classes)
         self.lr = lr
@@ -584,9 +620,10 @@ class LitUNet(pl.LightningModule):
         self.val_dice = torchmetrics.Dice(ignore_index=ignore_index, mdmc_average='global')
         self.test_dice = torchmetrics.Dice(ignore_index=ignore_index, mdmc_average='global')
         
-        self.train_confusion_matrix = torchmetrics.ConfusionMatrix(n_classes)
-        self.val_confusion_matrix = torchmetrics.ConfusionMatrix(n_classes)
-        self.test_confusion_matrix = torchmetrics.ConfusionMatrix(n_classes)
+        # TODO: Implement a custom ConfusionMatrix metrix to work with ignore_index
+        # self.train_confusion_matrix = torchmetrics.ConfusionMatrix(n_classes)
+        # self.val_confusion_matrix = torchmetrics.ConfusionMatrix(n_classes)
+        # self.test_confusion_matrix = torchmetrics.ConfusionMatrix(n_classes)
         
         self.save_hyperparameters()
     
@@ -612,7 +649,7 @@ class LitUNet(pl.LightningModule):
         self.train_dice(logits, y)
         self.log('dice/train', self.train_dice, on_epoch=True, on_step=False)
         
-        self.train_confusion_matrix(logits, y)
+        # self.train_confusion_matrix(logits, y)
         
         return loss
     
@@ -629,7 +666,7 @@ class LitUNet(pl.LightningModule):
         self.val_dice(logits, y)
         self.log('dice/val', self.val_dice, on_epoch=True, on_step=False)
         
-        self.val_confusion_matrix(logits, y)
+        # self.val_confusion_matrix(logits, y)
                 
     def configure_optimizers(self):
         optimizer = torch.optim.Adam(self.parameters(), lr=self.lr)
@@ -642,7 +679,7 @@ class LitUNet(pl.LightningModule):
         loss = self.cross_entropy(logits, y)
         self.test_accuracy(logits, y)
         self.test_dice(logits, y)
-        self.test_confusion_matrix(logits, y)
+        # self.test_confusion_matrix(logits, y)
 
 
 class TransferResNet(pl.LightningModule):
@@ -845,13 +882,16 @@ def load_image(src_path):
             image = src.read()
     # Map integers to floats in [0, 1]    
     max_val = np.iinfo(image.dtype).max
-    image = image / max_val
+    image = image.astype(np.float32) / max_val
     return image
 
 
 def load_label(src_path):
     with rasterio.open(src_path) as src:
         label = src.read(1)
+    # 0 is the unknown class, so we remap it to -1
+    # 0, 1, ... , k, --> -1, 0, ..., k-1
+    label = label.astype(np.int64) - 1
     return label
     
     
@@ -864,7 +904,6 @@ def read_data(image_paths, label_paths):
         y_img = load_label(y_path)
         images.append(x_img)
         labels.append(y_img)
-        
     return images, labels
 
 
@@ -895,38 +934,37 @@ def split_dataset(dataset, train_size, test_size=0., seed=None):
     return dataset_train, dataset_val, dataset_test
 
 
-def make_pixel_dataset(images, label_images):
-    """Select pixels with non-zero labels from a list of images.
+def make_pixel_dataset(images, label_images, ignore_index=-1):
+    """Select pixels with non-unknown labels from a list of images.
     Return the pixel values and their labels.
     """
     x_lst = []
     y_lst = []
     for x, y in zip(images, label_images):
-        mask = y != 0
+        mask = y != ignore_index
         y = y[mask]
         x = x[:, mask]
         x_lst.append(x)
         y_lst.append(y)
     x = np.concatenate(x_lst, 1).T
     y = np.concatenate(y_lst, 0)
-    # Remap labels 1..14 --> 0..13
-    y = y - 1
     return x, y
 
 
 def test_cropped_dataset(
-    src_path='HyRANK_satellite/ValidationSet/Erato.tif',
-    size=60,
+    src_path='HyRANK_satellite/TrainingSet/Dioni.tif',
+    use_padding=True,
+    size=64,
+    stride=52,
     rgb=(23, 11, 7),
 ):
-    
     # Load from disk
     src_path = Path(src_path)
     dst_path = Path(f'{src_path.stem}_reconstructed.tif')
     with rasterio.open(src_path) as src:
         image = src.read()
             
-    dataset = CroppedDataset(image, None, size, size)
+    dataset = CroppedDataset(image, None, size, stride, use_padding=use_padding)
     loader = DataLoader(dataset)
     
     # Write to disk
@@ -934,12 +972,12 @@ def test_cropped_dataset(
         dst_path, 'w',
         height=dataset.image.shape[-2],
         width=dataset.image.shape[-1],
-        count=image.shape[0],
-        dtype=image.dtype,
+        count=dataset.image.shape[0],
+        dtype=dataset.image.dtype,
         driver='Gtiff',
     ) as dst:
         for idx, x in enumerate(loader):
-            if idx % 5 == 0:
+            if idx % 2 == 0:
                 continue
             min_i, min_j, max_i, max_j = dataset.get_bounds(idx)
             window = rasterio.windows.Window.from_slices(
@@ -949,7 +987,7 @@ def test_cropped_dataset(
             
     fig, axs = plt.subplots(nrows=2, figsize=(16, 9))
     
-    image = image[rgb, ...].transpose(1, 2, 0)
+    image = dataset.image[rgb, ...].transpose(1, 2, 0)
     image = image / image.max()
     axs[0].imshow(image)
     axs[0].set_axis_off()
@@ -963,7 +1001,9 @@ def test_cropped_dataset(
     
     fig.tight_layout()
     plt.show()
-            
+
+
+test_cropped_dataset()   
 
 # %%
 ##########################################################
@@ -977,6 +1017,7 @@ def evaluate_model(trainer, dataset_test, names, ignore_index=None):
     best_model = trainer.model.load_from_checkpoint(trainer.checkpoint_callback.best_model_path)
     trainer.test(best_model, dataloaders=dataset_test)
     confusion_matrix = best_model.test_confusion_matrix.compute().cpu().numpy()
+    # TODO: Render this unnecessary
     if ignore_index is not None:
         if np.any(confusion_matrix[:, ignore_index]):
             warnings.warn('`confusion_matrix` has predictions with label `ignore_index`')
