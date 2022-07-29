@@ -254,15 +254,15 @@ class CroppedDataset(Dataset):
         x = torch.tensor(x, dtype=torch.float32)
         
         if self.labels is not None:
-          y = self.labels[min_i : max_i, min_j : max_j]
-          y = torch.tensor(y, dtype=torch.int64)
-          if self.transform is not None:
-            x, y = self.transform(x, y)
-          return x, y
+            y = self.labels[min_i : max_i, min_j : max_j]
+            y = torch.tensor(y, dtype=torch.int64)
+            if self.transform is not None:
+                x, y = self.transform(x, y)
+            return x, y
         else:
-          if self.transform is not None:
-            x = self.transform(x)
-          return x
+            if self.transform is not None:
+                x = self.transform(x)
+            return x
 
     def get_bounds(self, idx):
         r, c = divmod(idx, self.n_cols)
@@ -332,12 +332,6 @@ class LitMLP(pl.LightningModule):
         self.val_accuracy = torchmetrics.Accuracy()
         self.test_accuracy = torchmetrics.Accuracy()
         
-        self.train_dice = torchmetrics.Dice()
-        self.val_dice = torchmetrics.Dice()
-        self.test_dice = torchmetrics.Dice()
-        
-        self.train_confusion_matrix = torchmetrics.ConfusionMatrix(dim_out)
-        self.val_confusion_matrix = torchmetrics.ConfusionMatrix(dim_out)
         self.test_confusion_matrix = torchmetrics.ConfusionMatrix(dim_out)
         
         self.save_hyperparameters()
@@ -360,12 +354,7 @@ class LitMLP(pl.LightningModule):
         
         self.train_accuracy(logits, y)
         self.log('accuracy/train', self.train_accuracy, on_epoch=True, on_step=False)
-        
-        self.train_dice(logits, y)
-        self.log('dice/train', self.train_dice, on_epoch=True, on_step=False)
-        
-        self.train_confusion_matrix(logits, y)
-        
+         
         return loss
     
     def validation_step(self, batch,  batch_idx):
@@ -378,16 +367,10 @@ class LitMLP(pl.LightningModule):
         self.val_accuracy(logits, y)
         self.log('accuracy/val', self.val_accuracy, on_epoch=True, on_step=False)
         
-        self.val_dice(logits, y)
-        self.log('dice/val', self.val_dice, on_epoch=True, on_step=False)
-        
-        self.val_confusion_matrix(logits, y)
-        
     def test_step(self, batch,  batch_idx):
         x, y = batch
         logits = self(x)
         self.test_accuracy(logits, y)
-        self.test_dice(logits, y)
         self.test_confusion_matrix(logits, y)
         
     def configure_optimizers(self):
@@ -449,12 +432,6 @@ class LitCNN(pl.LightningModule):
         self.val_accuracy = torchmetrics.Accuracy()
         self.test_accuracy = torchmetrics.Accuracy()
         
-        self.train_dice = torchmetrics.Dice()
-        self.val_dice = torchmetrics.Dice()
-        self.test_dice = torchmetrics.Dice()
-        
-        self.train_confusion_matrix = torchmetrics.ConfusionMatrix(n_classes)
-        self.val_confusion_matrix = torchmetrics.ConfusionMatrix(n_classes)
         self.test_confusion_matrix = torchmetrics.ConfusionMatrix(n_classes)
         
         self.save_hyperparameters()
@@ -484,11 +461,6 @@ class LitCNN(pl.LightningModule):
 
         self.train_accuracy(logits, y)
         self.log('accuracy/train', self.train_accuracy, on_epoch=True, on_step=False)
-        
-        self.train_dice(logits, y)
-        self.log('dice/train', self.train_dice, on_epoch=True, on_step=False)
-        
-        self.train_confusion_matrix(logits, y)
 
         return loss
     
@@ -502,16 +474,10 @@ class LitCNN(pl.LightningModule):
         self.val_accuracy(logits, y)
         self.log('accuracy/val', self.val_accuracy, on_epoch=True, on_step=False)
         
-        self.val_dice(logits, y)
-        self.log('dice/val', self.val_dice, on_epoch=True, on_step=False)
-        
-        self.val_confusion_matrix(logits, y)
-        
     def test_step(self, batch,  batch_idx):
         x, y = batch
         logits = self(x)
         self.test_accuracy(logits, y)
-        self.test_dice(logits, y)
         self.test_confusion_matrix(logits, y)
 
     def configure_optimizers(self):
@@ -607,23 +573,15 @@ class LitUNet(pl.LightningModule):
         super().__init__()
         self.unet = UNet(n_channels, n_classes)
         self.lr = lr
-        
-        # TODO: Dice loss is consistently about 1/10 lower than in the other models. Bug?
+        self.ignore_index = ignore_index
         
         self.cross_entropy = nn.CrossEntropyLoss(ignore_index=ignore_index)
         
-        # self.train_accuracy = torchmetrics.Accuracy(ignore_index=ignore_index, mdmc_average='global')
-        # self.val_accuracy = torchmetrics.Accuracy(ignore_index=ignore_index, mdmc_average='global')
-        # self.test_accuracy = torchmetrics.Accuracy(ignore_index=ignore_index, mdmc_average='global')
+        self.train_accuracy = torchmetrics.Accuracy(ignore_index=ignore_index, mdmc_average='global')
+        self.val_accuracy = torchmetrics.Accuracy(ignore_index=ignore_index, mdmc_average='global')
+        self.test_accuracy = torchmetrics.Accuracy(ignore_index=ignore_index, mdmc_average='global')
         
-        # self.train_dice = torchmetrics.Dice(ignore_index=ignore_index, mdmc_average='global')
-        # self.val_dice = torchmetrics.Dice(ignore_index=ignore_index, mdmc_average='global')
-        # self.test_dice = torchmetrics.Dice(ignore_index=ignore_index, mdmc_average='global')
-        
-        # TODO: Implement a custom ConfusionMatrix metrix to work with ignore_index
-        # self.train_confusion_matrix = torchmetrics.ConfusionMatrix(n_classes)
-        # self.val_confusion_matrix = torchmetrics.ConfusionMatrix(n_classes)
-        # self.test_confusion_matrix = torchmetrics.ConfusionMatrix(n_classes)
+        self.test_confusion_matrix = torchmetrics.ConfusionMatrix(n_classes)
         
         self.save_hyperparameters()
     
@@ -643,13 +601,8 @@ class LitUNet(pl.LightningModule):
         loss = self.cross_entropy(logits, y)
         self.log('loss/train', loss, on_epoch=True, on_step=False)
         
-        # self.train_accuracy(logits, y)
-        # self.log('accuracy/train', self.train_accuracy, on_epoch=True, on_step=False)
-        
-        # self.train_dice(logits, y)
-        # self.log('dice/train', self.train_dice, on_epoch=True, on_step=False)
-        
-        # self.train_confusion_matrix(logits, y)
+        self.train_accuracy(logits, y)
+        self.log('accuracy/train', self.train_accuracy, on_epoch=True, on_step=False)
         
         return loss
     
@@ -660,26 +613,25 @@ class LitUNet(pl.LightningModule):
         loss = self.cross_entropy(logits, y)
         self.log('loss/val', loss, on_epoch=True, on_step=False)
         
-        # self.val_accuracy(logits, y)
-        # self.log('accuracy/val', self.val_accuracy, on_epoch=True, on_step=False)
+        self.val_accuracy(logits, y)
+        self.log('accuracy/val', self.val_accuracy, on_epoch=True, on_step=False)
         
-        # self.val_dice(logits, y)
-        # self.log('dice/val', self.val_dice, on_epoch=True, on_step=False)
-        
-        # self.val_confusion_matrix(logits, y)
-                
     def configure_optimizers(self):
         optimizer = torch.optim.Adam(self.parameters(), lr=self.lr)
         return optimizer
     
-    # def test_step(self, batch, batch_idx):
-    #     x, y = batch
-    #     logits = self(x)
+    def test_step(self, batch, batch_idx):
+        x, y = batch
+        logits = self(x)
         
-    #     loss = self.cross_entropy(logits, y)
-    #     self.test_accuracy(logits, y)
-    #     self.test_dice(logits, y)
-    #     self.test_confusion_matrix(logits, y)
+        loss = self.cross_entropy(logits, y)
+        self.test_accuracy(logits, y)
+        
+        mask = y != self.ignore_index
+        self.test_confusion_matrix(
+            torch.transpose(logits, 1, 0)[:, mask].T,
+            y[mask]
+        )
 
 
 class TransferResNet(pl.LightningModule):
@@ -702,12 +654,6 @@ class TransferResNet(pl.LightningModule):
         self.val_accuracy = torchmetrics.Accuracy()
         self.test_accuracy = torchmetrics.Accuracy()
         
-        self.train_dice = torchmetrics.Dice()
-        self.val_dice = torchmetrics.Dice()
-        self.test_dice = torchmetrics.Dice()
-        
-        self.train_confusion_matrix = torchmetrics.ConfusionMatrix(n_classes)
-        self.val_confusion_matrix = torchmetrics.ConfusionMatrix(n_classes)
         self.test_confusion_matrix = torchmetrics.ConfusionMatrix(n_classes)
         
         self.save_hyperparameters()
@@ -731,11 +677,6 @@ class TransferResNet(pl.LightningModule):
         self.train_accuracy(logits, y)
         self.log('accuracy/train', self.train_accuracy, on_epoch=True, on_step=False)
         
-        self.train_dice(logits, y)
-        self.log('dice/train', self.train_dice, on_epoch=True, on_step=False)
-        
-        self.train_confusion_matrix(logits, y)
-        
         return loss
     
     def validation_step(self, batch,  batch_idx):
@@ -748,16 +689,10 @@ class TransferResNet(pl.LightningModule):
         self.val_accuracy(logits, y)
         self.log('accuracy/val', self.val_accuracy, on_epoch=True, on_step=False)
         
-        self.val_dice(logits, y)
-        self.log('dice/val', self.val_dice, on_epoch=True, on_step=False)
-        
-        self.val_confusion_matrix(logits, y)
-        
     def test_step(self, batch,  batch_idx):
         x, y = batch
         logits = self(x)
         self.test_accuracy(logits, y)
-        self.test_dice(logits, y)
         self.test_confusion_matrix(logits, y)
 
     def configure_optimizers(self):
@@ -1007,21 +942,13 @@ def test_cropped_dataset(
 # MODEL TRAINING FUNCTIONS (Hardcoded)
 ##########################################################
 
-def evaluate_model(trainer, dataset_test, names, ignore_index=None):
+def evaluate_model(trainer, dataset_test, names):
     """Test a model and display the accuracy, the dice loss and the confusion matrix.
     This function assumes a very specific structure of the input.
     """
     best_model = trainer.model.load_from_checkpoint(trainer.checkpoint_callback.best_model_path)
     trainer.test(best_model, dataloaders=dataset_test)
     confusion_matrix = best_model.test_confusion_matrix.compute().cpu().numpy()
-    # TODO: Render this unnecessary
-    if ignore_index is not None:
-        if np.any(confusion_matrix[:, ignore_index]):
-            warnings.warn('`confusion_matrix` has predictions with label `ignore_index`')
-        else:
-            del names[ignore_index]
-            confusion_matrix = np.delete(confusion_matrix, ignore_index, 0)
-            confusion_matrix = np.delete(confusion_matrix, ignore_index, 1)
     
     title = type(best_model).__name__
     print(title)
