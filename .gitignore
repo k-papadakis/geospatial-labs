@@ -7,3 +7,5 @@ data/
 __pycache__/
 output/
 temp.py
+dist/
+*egg-info/
