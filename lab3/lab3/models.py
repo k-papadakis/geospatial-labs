@@ -298,8 +298,9 @@ class LitUNet(pl.LightningModule):
         loss = self.cross_entropy(logits, y)
         self.log('loss/train', loss, on_epoch=True, on_step=False)
         
-        self.train_accuracy(logits, y)
-        self.log('accuracy/train', self.train_accuracy, on_epoch=True, on_step=False)
+        if not torch.all(y == self.ignore_index):  # avoid torchmetrics bug
+            self.train_accuracy(logits, y)
+            self.log('accuracy/train', self.train_accuracy, on_epoch=True, on_step=False)
         
         return loss
     
@@ -310,8 +311,9 @@ class LitUNet(pl.LightningModule):
         loss = self.cross_entropy(logits, y)
         self.log('loss/val', loss, on_epoch=True, on_step=False)
         
-        self.val_accuracy(logits, y)
-        self.log('accuracy/val', self.val_accuracy, on_epoch=True, on_step=False)
+        if not torch.all(y == self.ignore_index):  # avoid torchmetrics bug
+            self.val_accuracy(logits, y)
+            self.log('accuracy/val', self.val_accuracy, on_epoch=True, on_step=False)
         
     def configure_optimizers(self):
         optimizer = torch.optim.Adam(self.parameters(), lr=self.lr)
@@ -319,17 +321,19 @@ class LitUNet(pl.LightningModule):
     
     def test_step(self, batch, batch_idx):
         x, y = batch
-        logits = self(x)
+        if not torch.all(y == self.ignore_index):  # avoid torchmetrics bug
+            logits = self(x)
         
-        loss = self.cross_entropy(logits, y)
-        self.test_accuracy(logits, y)
+            # loss = self.cross_entropy(logits, y)
+            self.test_accuracy(logits, y)
+            self.test_confusion_matrix(*self.filter_ignore_index(logits, y))
         
+    def filter_ignore_index(self, logits, y):
         mask = y != self.ignore_index
-        self.test_confusion_matrix(
-            torch.transpose(logits, 1, 0)[:, mask].T,
-            y[mask]
-        )
-
+        logits = torch.transpose(logits, 1, 0)[:, mask].T
+        y = y[mask]
+        return logits, y
+        
 
 class LitTransferResNet(pl.LightningModule):
     """ResNet with the last layer replaced so that its output matches n_classes"""

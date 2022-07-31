@@ -174,7 +174,7 @@ def predict_image_cnn(
         dtype=rasterio.uint8,
         driver='Gtiff',
     ) as dst:
-        dst.write(preds.numpy().astype(rasterio.uint8)[np.newaxis, ...])
+        dst.write(preds.numpy().astype(rasterio.uint8)[np.newaxis, ...] + 1)
         
         
 def predict_all_images_cnn(
@@ -237,7 +237,7 @@ def predict_image_unet(src_path, dst_path, size, model):
         dtype=rasterio.uint8,
         driver='Gtiff',
     ) as dst:
-        dst.write((pred_image + 1).astype(rasterio.uint8))
+        dst.write((pred_image).astype(rasterio.uint8) + 1)
             
 
 def predict_all_images_unet(

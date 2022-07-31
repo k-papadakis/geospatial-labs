@@ -91,7 +91,7 @@ def train_mlp(
         default_root_dir=output_dir / 'mlp_results'
     )
     trainer.fit(mlp, pixel_loader_train, pixel_loader_val)
-    evaluate_model(trainer, pixel_loader_test, names, output_dir=OUTPUT_DIR)
+    evaluate_model(trainer, pixel_loader_test, names, output_dir=output_dir)
     
     
 def train_cnn(
@@ -205,146 +205,140 @@ def train_unet_overlap(
     return trainer
 
 
-# %%
-# if __name__ == '__main__':
-random_state = 42
-rgb = (23, 11, 7)
-info_path = 'hyrank_info.csv'
-train_x_paths = (
-    'HyRANK_satellite/TrainingSet/Dioni.tif',
-    'HyRANK_satellite/TrainingSet/Loukia.tif',
-)
-train_y_paths = (
-    'HyRANK_satellite/TrainingSet/Dioni_GT.tif',
-    'HyRANK_satellite/TrainingSet/Loukia_GT.tif'
-)
-validation_x_paths = (
-    'HyRANK_satellite/ValidationSet/Erato.tif',
-    'HyRANK_satellite/ValidationSet/Kirki.tif',
-    'HyRANK_satellite/ValidationSet/Nefeli.tif',
-)
-OUTPUT_DIR = Path('output')
-OUTPUT_DIR.mkdir(exist_ok=True)
-DEVICE = 'gpu' if torch.cuda.is_available() else 'cpu'
-# %%
-# LOAD THE IMAGES AND THEIR INFO
-images, label_images = read_data(train_x_paths, train_y_paths)
-info = read_info(info_path)
-classnames = info['name']
-colors = info['color']
-cmap = mpl.colors.ListedColormap(info['color'])
-norm = mpl.colors.BoundaryNorm(np.arange(-1, 14+1), ncolors=15)
-
-# %%
-# Display the training data
-for image, label, path in zip(images, label_images, train_x_paths):
-    path = Path(path)
-    display_image_and_label(
-        image=image, label=label,
-        cmap=cmap, norm=norm, classnames=classnames, rgb=rgb, title=path.stem,
+def main():
+    random_state = 42
+    rgb = (23, 11, 7)
+    info_path = 'hyrank_info.csv'
+    train_x_paths = (
+        'HyRANK_satellite/TrainingSet/Dioni.tif',
+        'HyRANK_satellite/TrainingSet/Loukia.tif',
     )
-    plt.savefig(OUTPUT_DIR / path.with_suffix('.png').name)
+    train_y_paths = (
+        'HyRANK_satellite/TrainingSet/Dioni_GT.tif',
+        'HyRANK_satellite/TrainingSet/Loukia_GT.tif'
+    )
+    validation_x_paths = (
+        'HyRANK_satellite/ValidationSet/Erato.tif',
+        'HyRANK_satellite/ValidationSet/Kirki.tif',
+        'HyRANK_satellite/ValidationSet/Nefeli.tif',
+    )
+    output_dir = Path('output')
+    output_dir.mkdir(exist_ok=True)
+    DEVICE = 'gpu' if torch.cuda.is_available() else 'cpu'
+    
+    # LOAD THE IMAGES AND THEIR INFO
+    images, label_images = read_data(train_x_paths, train_y_paths)
+    info = read_info(info_path)
+    classnames = info['name']
+    colors = info['color']
+    cmap = mpl.colors.ListedColormap(info['color'])
+    norm = mpl.colors.BoundaryNorm(np.arange(-1, 14+1), ncolors=15)
 
-# %%
-# CREATE DATASETS AND DATALOADERS
+    # Display the training data
+    for image, label, path in zip(images, label_images, train_x_paths):
+        path = Path(path)
+        display_image_and_label(
+            image=image, label=label,
+            cmap=cmap, norm=norm, classnames=classnames, rgb=rgb, title=path.stem,
+        )
+        plt.savefig(output_dir / path.with_suffix('.png').name)
 
-# Patch Dataset All Channels
-patch_dataset = ConcatDataset([
-    PatchDatasetPostPad(image, label_image, patch_size=15)
-    for image, label_image in zip(images, label_images)
-])
-patch_dataset_train, patch_dataset_val, patch_dataset_test = split_dataset(
-    patch_dataset, train_size=0.7, test_size=0.15, seed=random_state
-)
-patch_dataset_train_aug = AugmentedDataset(patch_dataset_train, flip_and_rotate)
+    # CREATE DATASETS AND DATALOADERS
+    # Patch Dataset All Channels
+    patch_dataset = ConcatDataset([
+        PatchDatasetPostPad(image, label_image, patch_size=15)
+        for image, label_image in zip(images, label_images)
+    ])
+    patch_dataset_train, patch_dataset_val, patch_dataset_test = split_dataset(
+        patch_dataset, train_size=0.7, test_size=0.15, seed=random_state
+    )
+    patch_dataset_train_aug = AugmentedDataset(patch_dataset_train, flip_and_rotate)
 
-patch_loader_full = DataLoader(AugmentedDataset(patch_dataset, flip_and_rotate))
-patch_loader_train = DataLoader(patch_dataset_train, batch_size=64, shuffle=True, num_workers=2)
-patch_loader_train_aug = DataLoader(patch_dataset_train_aug, batch_size=64, shuffle=True, num_workers=2)
-patch_loader_val = DataLoader(patch_dataset_val, batch_size=64, num_workers=2)
-patch_loader_test = DataLoader(patch_dataset_test, batch_size=64, num_workers=2)
+    patch_loader_full = DataLoader(AugmentedDataset(patch_dataset, flip_and_rotate), batch_size=64, shuffle=True, num_workers=2)
+    patch_loader_train = DataLoader(patch_dataset_train, batch_size=64, shuffle=True, num_workers=2)
+    patch_loader_train_aug = DataLoader(patch_dataset_train_aug, batch_size=64, shuffle=True, num_workers=2)
+    patch_loader_val = DataLoader(patch_dataset_val, batch_size=64, num_workers=2)
+    patch_loader_test = DataLoader(patch_dataset_test, batch_size=64, num_workers=2)
 
-# Patch Dataset RGB Only   
-rgb_dataset = ConcatDataset([
-    PatchDatasetPostPad(image, label_image, patch_size=15, channels=rgb)
-    for image, label_image in zip(images, label_images)
-])
-rgb_dataset_train, rgb_dataset_val, rgb_dataset_test = split_dataset(
-    rgb_dataset, train_size=0.7, test_size=0.15, seed=random_state
-)
-rgb_dataset_train_aug = AugmentedDataset(rgb_dataset_train, flip_and_rotate)
+    # Patch Dataset RGB Only   
+    rgb_dataset = ConcatDataset([
+        PatchDatasetPostPad(image, label_image, patch_size=15, channels=rgb)
+        for image, label_image in zip(images, label_images)
+    ])
+    rgb_dataset_train, rgb_dataset_val, rgb_dataset_test = split_dataset(
+        rgb_dataset, train_size=0.7, test_size=0.15, seed=random_state
+    )
+    rgb_dataset_train_aug = AugmentedDataset(rgb_dataset_train, flip_and_rotate)
 
-rgb_loader_train = DataLoader(rgb_dataset_train, batch_size=256, shuffle=True, num_workers=2)
-rgb_loader_train_aug = DataLoader(rgb_dataset_train_aug, batch_size=256, shuffle=True, num_workers=2)
-rgb_loader_val = DataLoader(rgb_dataset_val, batch_size=256, num_workers=2)
-rgb_loader_test = DataLoader(rgb_dataset_test, batch_size=256, num_workers=2)
+    rgb_loader_train = DataLoader(rgb_dataset_train, batch_size=256, shuffle=True, num_workers=2)
+    rgb_loader_train_aug = DataLoader(rgb_dataset_train_aug, batch_size=256, shuffle=True, num_workers=2)
+    rgb_loader_val = DataLoader(rgb_dataset_val, batch_size=256, num_workers=2)
+    rgb_loader_test = DataLoader(rgb_dataset_test, batch_size=256, num_workers=2)
+
+    # Cropped Dataset
+    stride = 64
+    crop_size = 64
+    cropped_dataset = ConcatDataset([
+        CroppedDataset(
+            image, label_image, crop_size=crop_size,
+            stride=stride, use_padding=True,
+        )  
+        for image, label_image in zip(images, label_images)
+    ])
+    cropped_dataset_train, cropped_dataset_val, cropped_dataset_test = split_dataset(
+        cropped_dataset, train_size=0.7, test_size=0.15, seed=random_state
+    )
+    cropped_dataset_train_aug = AugmentedDataset(
+        cropped_dataset_train, transform=flip_and_rotate, apply_on_target=True
+    )
+
+    # Use batch_size=2 when running locally
+    cropped_loader_train_aug = DataLoader(cropped_dataset_train_aug, batch_size=16, shuffle=True, num_workers=2)
+    cropped_loader_val = DataLoader(cropped_dataset_val, batch_size=16, num_workers=2)
+    cropped_loader_test = DataLoader(cropped_dataset_test, batch_size=16, num_workers=2)
+
+    display_segmentation(cropped_dataset_train_aug, 80, cmap=cmap, norm=norm, names=classnames, rgb=rgb, n_repeats=5)    
+
+    print('\nTraining Random Forest and SVM...')
+    train_evaluate_traditional(images, label_images, names=classnames[1:], random_state=random_state)
+    print('\nTraining MLP...')
+    train_mlp(images, label_images, names=classnames[1:], random_state=random_state, epochs=2_000, accelerator=DEVICE, output_dir=output_dir)
+    print('\nTraining CNN...')
+    train_cnn(patch_loader_train_aug, patch_loader_val, patch_loader_test, names=classnames[1:], epochs=2_000, accelerator=DEVICE, output_dir=output_dir)
+    print('\nTraining ResNet...')
+    train_resnet(rgb_loader_train_aug, rgb_loader_val, rgb_loader_test, names=classnames[1:], freeze_head=False, epochs=2_000, accelerator=DEVICE, output_dir=output_dir)
+    print('\nTraining U-Net...')
+    train_unet(cropped_loader_train_aug, cropped_loader_val, cropped_loader_test, names=classnames[1:], epochs=2_000, accelerator=DEVICE, output_dir=output_dir)
+
+    print('\nTraining CNN on all the data')
+    train_cnn(patch_loader_full, None, None, names=classnames[1:], epochs=2_000, accelerator=DEVICE, output_dir=output_dir)
+    print('\nTraining U-Net on all the data')
+    train_unet_overlap(crop_size=64, stride=32, images=images, label_images=label_images, epochs=2_000, batch_size=16, accelerator=DEVICE)
+
+    print('\nPredicting unlabelled data with CNN')
+    ckpt_path_cnn = list((output_dir / 'cnn_results_full').glob('**/*.ckpt'))[-1]
+    model = LitCNN.load_from_checkpoint(ckpt_path_cnn)
+    model.eval()
+    predict_all_images_cnn(
+        paths=validation_x_paths, model=model, batch_size=64,
+        cmap=cmap, norm=norm, classnames=classnames, rgb=rgb,
+        accelerator=DEVICE, output_dir=output_dir
+    )
+
+    print('\nPredicting unlabelled data with UNet')
+    ckpt_path_unet = list((output_dir / 'unet_results_overlap').glob('**/*.ckpt'))[-1]
+    model = LitUNet.load_from_checkpoint(ckpt_path_unet)
+    model.eval()
+    predict_all_images_unet(
+        paths=validation_x_paths, size=64,
+        model=model, cmap=cmap, norm=norm, classnames=classnames, rgb=rgb,
+        output_dir=output_dir
+    )
 
 
-# Cropped Dataset
-stride = 64
-crop_size = 64
-cropped_dataset = ConcatDataset([
-    CroppedDataset(
-        image, label_image, crop_size=crop_size,
-        stride=stride, use_padding=True,
-    )  
-    for image, label_image in zip(images, label_images)
-])
-cropped_dataset_train, cropped_dataset_val, cropped_dataset_test = split_dataset(
-    cropped_dataset, train_size=0.7, test_size=0.15, seed=random_state
-)
-cropped_dataset_train_aug = AugmentedDataset(
-    cropped_dataset_train, transform=flip_and_rotate, apply_on_target=True
-)
-
-# Use batch_size=2 when running locally
-cropped_loader_train_aug = DataLoader(cropped_dataset_train_aug, batch_size=16, shuffle=True, num_workers=2)
-cropped_loader_val = DataLoader(cropped_dataset_val, batch_size=16, num_workers=2)
-cropped_loader_test = DataLoader(cropped_dataset_test, batch_size=16, num_workers=2)
-
-# %%
-display_segmentation(cropped_dataset_train_aug, 80, cmap=cmap, norm=norm, names=classnames, rgb=rgb, n_repeats=5)    
-
-print('\nTraining Random Forest and SVM...')
-train_evaluate_traditional(images, label_images, names=classnames[1:], random_state=random_state)
-print('\nTraining MLP...')
-train_mlp(images, label_images, names=classnames[1:], random_state=random_state, epochs=500, accelerator=DEVICE, output_dir=OUTPUT_DIR)
-print('\nTraining CNN...')
-train_cnn(patch_loader_train_aug, patch_loader_val, patch_loader_test, names=classnames[1:], epochs=500, accelerator=DEVICE, output_dir=OUTPUT_DIR)
-print('\nTraining ResNet...')
-train_resnet(rgb_loader_train_aug, rgb_loader_val, rgb_loader_test, names=classnames[1:], freeze_head=False, epochs=500, accelerator=DEVICE, output_dir=OUTPUT_DIR)
-print('\nTraining U-Net...')
-train_unet(cropped_loader_train_aug, cropped_loader_val, cropped_loader_test, names=classnames[1:], epochs=500, accelerator=DEVICE, output_dir=OUTPUT_DIR)
-print('\nFinished!')
-
-# Train U-Net with overlap on the entire dataset to use it for the final estimation.
-train_unet_overlap(crop_size=64, stride=32, images=images, label_images=label_images, epochs=500, batch_size=16, accelerator=DEVICE)
-
-
-# %%
-#####
-train_cnn(patch_loader_full, None, None, names=classnames[1:], epochs=1, accelerator=DEVICE, output_dir=OUTPUT_DIR)
-
-# %%
-# Evaluate on the unlabelled dataset
-ckpt_path_cnn = list((OUTPUT_DIR / 'cnn_results_full').glob('**/*.ckpt'))[-1]
-model = LitCNN.load_from_checkpoint(ckpt_path_cnn)
-model.eval()
-predict_all_images_cnn(
-    paths=validation_x_paths, model=model, batch_size=64,
-    cmap=cmap, norm=norm, classnames=classnames, rgb=rgb,
-    accelerator=DEVICE, output_dir=OUTPUT_DIR
-)
-
-# %%
-ckpt_path_unet = list((OUTPUT_DIR / 'unet_results_overlap').glob('**/*.ckpt'))[-1]
-model = LitUNet.load_from_checkpoint(ckpt_path_unet)
-model.eval()
-predict_all_images_unet(
-    paths=validation_x_paths, size=64,
-    model=model, cmap=cmap, norm=norm, classnames=classnames, rgb=rgb,
-    output_dir=OUTPUT_DIR
-)
+if __name__ == '__main__':
+    main()
+    
 
 ##########################################################
 # COMMENTARY
@@ -373,6 +367,5 @@ predict_all_images_unet(
 
 # Of all the models, only the segmentation model with no overlap
 # is the one that it test somewhat realistically.
-
 
 # %%
