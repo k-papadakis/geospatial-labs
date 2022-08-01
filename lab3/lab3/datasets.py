@@ -334,7 +334,7 @@ def test_cropped_dataset(
     rgb=(23, 11, 7),
 ):
     import matplotlib.pyplot as plt
-    from utils import load_image
+    from .utils import load_image
     
     # Load from disk
     src_path = Path(src_path)

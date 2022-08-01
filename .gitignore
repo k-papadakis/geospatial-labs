@@ -1,11 +1,10 @@
 env
 *.tif
 *.pt
-lightning_logs
+lightning_logs/
 data/
 .vscode
 __pycache__/
-output/
 temp.py
 dist/
 *egg-info/
