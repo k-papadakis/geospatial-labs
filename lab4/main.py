@@ -229,28 +229,28 @@ val_dset = UCF101(
     ]
 )
 
-# train_dloader = DataLoader(train_dset, batch_size=16, collate_fn=pad_sequences_collate_fn, shuffle=True, num_workers=4)
-# val_dloader = DataLoader(val_dset, batch_size=16, collate_fn=pad_sequences_collate_fn, shuffle=False, num_workers=4)
+train_dloader = DataLoader(train_dset, batch_size=16, collate_fn=pad_sequences_collate_fn, shuffle=True, num_workers=4)
+val_dloader = DataLoader(val_dset, batch_size=16, collate_fn=pad_sequences_collate_fn, shuffle=False, num_workers=4)
 
-# callbacks = [
-#     EarlyStopping(monitor="accuracy/val", mode="max", patience=50),
-#     ModelCheckpoint(monitor="accuracy/val", mode="max", save_last=True)
-# ]
+callbacks = [
+    EarlyStopping(monitor="accuracy/val", mode="max", patience=50),
+    ModelCheckpoint(monitor="accuracy/val", mode="max", save_last=True)
+]
 
-# model = Seq2Vec(512, len(train_dset.categories), learning_rate=1e-4)
-# trainer = pl.Trainer(
-#     accelerator="gpu", 
-#     devices=1,
-#     min_epochs=300,
-#     max_epochs=1000,
-#     callbacks=callbacks,
-#     default_root_dir="seq2vec_gru"
-# )
+model = Seq2Vec(512, len(train_dset.categories), learning_rate=1e-4)
+trainer = pl.Trainer(
+    accelerator="gpu", 
+    devices=1,
+    min_epochs=300,
+    max_epochs=1000,
+    callbacks=callbacks,
+    default_root_dir="seq2vec_gru"
+)
 
-# trainer.fit(model, train_dataloaders=train_dloader, val_dataloaders=val_dloader)
+trainer.fit(model, train_dataloaders=train_dloader, val_dataloaders=val_dloader)
 
-# %%
-for x, y in train_dset:
-    pass
-for x, y in val_dset:
-    pass
+# # %%
+# for x, y in train_dset:
+#     pass
+# for x, y in val_dset:
+#     pass
