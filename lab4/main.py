@@ -1,5 +1,6 @@
 # %%
 from pathlib import Path
+import re
 
 import numpy as np
 import matplotlib.pyplot as plt
@@ -9,7 +10,7 @@ from sklearn.metrics import ConfusionMatrixDisplay, classification_report
 import torch
 from torch import nn
 import torch.nn.functional as F
-from torch.utils.data import Dataset, DataLoader, random_split
+from torch.utils.data import Dataset, DataLoader, Subset
 from torch.nn.utils.rnn import pad_sequence
 from torchvision.io import read_video
 from torchvision.models import resnet18, ResNet18_Weights
@@ -151,22 +152,29 @@ def plot_transformed(video_path):
         axs[i, 1].imshow(preprocessed[i])
         axs[i, 0].set_axis_off()
         axs[i, 1].set_axis_off()
-        
-        
-def split_dataset(dataset, train_size, test_size=0., seed=None):
-    """Splits a PyTorch Dataset into train, validation and test Subsets."""
-    if not 0 <= train_size + test_size <= 1:
-        raise ValueError('Invalid train/test sizes')
-    n = len(dataset)
-    n_train = int(train_size * n)
-    n_test = int(test_size * n)
-    n_val = n - (n_train + n_test)
-    generator = torch.Generator()
-    if seed is not None:
-        generator.manual_seed(seed)
-    dataset_train, dataset_val, dataset_test = random_split(
-        dataset, [n_train, n_val, n_test], generator)
-    return dataset_train, dataset_val, dataset_test
+
+
+def test_val_split(n_groups_test):
+    """Splits test UCF101 dataset into test and validation datasets.
+    
+    Every class in the test UCF101 directory has 7 video groups,
+    and every video group has 7 videos,
+    which are cuts of the a single original video.
+    The first `n_groups_test` video groups of each class will comprise our test set,
+    and the rest `7 - n_groups` video groups will comprise our validation set.
+    """
+    p = re.compile(rf'v_[a-zA-Z]*_g0[1-{n_groups_test}]')
+    test_indices, val_indices = [], []
+    for i, s in enumerate(dataset_test_original.filenames):
+        if p.match(s):
+            test_indices.append(i)
+        else:
+            val_indices.append(i)
+
+    dataset_test = Subset(dataset_test_original, test_indices)
+    dataset_val = Subset(dataset_test_original, val_indices)
+
+    return dataset_test, dataset_val
 
 
 def rnn_collate_fn(batch):
@@ -242,7 +250,6 @@ class GRUClassifier(pl.LightningModule):
         return optimizer
 
 
-seed = 7
 root_dir = 'data'
 # cache_all(root_dir)
 transform = None  # Hack to save some memory
@@ -255,7 +262,8 @@ dataset_test_original = Ucf101(
     root_dir=root_dir, training=False, transform=transform,
     cache_fetched=True, cache_exist_ok=True,
 )
-dataset_val, dataset_test, _ = split_dataset(dataset_test_original, 0.5, seed=seed)
+dataset_test, dataset_val = test_val_split(4)
+
 
 loader_train_rnn = DataLoader(
     dataset_train, shuffle=True, collate_fn=rnn_collate_fn,
@@ -279,13 +287,13 @@ rnn = GRUClassifier(
     lr=1e-3,
 )
 callbacks = [
-    EarlyStopping(monitor='loss/val', mode='min', patience=20),
+    EarlyStopping(monitor='loss/val', mode='min', patience=50),
     ModelCheckpoint(monitor='loss/val', mode='min', save_last=True)
 ]
 trainer = pl.Trainer(
     accelerator='gpu',
     min_epochs=1,
-    max_epochs=100,
+    max_epochs=200,
     callbacks=callbacks,
     default_root_dir='rnn_results'
 )
