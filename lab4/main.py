@@ -1,256 +1,309 @@
 # %%
-from typing import Callable, List
-import os
-import pickle
+from pathlib import Path
 
 import numpy as np
-import pandas as pd
+import matplotlib.pyplot as plt
+
+from sklearn.metrics import ConfusionMatrixDisplay, classification_report
 
 import torch
 from torch import nn
 import torch.nn.functional as F
-from torch.utils.data import Dataset, DataLoader
+from torch.utils.data import Dataset, DataLoader, random_split
 from torch.nn.utils.rnn import pad_sequence
 from torchvision.io import read_video
-from torchvision.models import resnet18
+from torchvision.models import resnet18, ResNet18_Weights
 from torchvision.models.feature_extraction import create_feature_extractor
-from torchvision.transforms import ConvertImageDtype, Resize, Normalize
 
 import pytorch_lightning as pl
 from pytorch_lightning.callbacks import EarlyStopping, ModelCheckpoint
-from torchmetrics import Accuracy
+from torchmetrics import Accuracy 
 
-
-VTransform = Callable[[torch.Tensor], torch.Tensor]
-
-
-class UCF101(Dataset):
-    def __init__(self, data_root, mode="train", video_transforms: List[VTransform] = [], use_precomputed=True):
-        '''
-        Return a UCF101 Dataset instance
-        '''
-        super().__init__()
-        assert mode in ["train", "test"]
+# %%
+class Ucf101(Dataset):
+    
+    def __init__(
+        self, root_dir, training: bool, transform=None,
+        cache_fetched=False, cache_exist_ok=False, cuda=False,
+    ):
+        # If isinstance(transform, nn.Module) and cuda=True,
+        #  then multiprocessing will fail (e.g. DataLoader).
+        # Generally, avoid using a DataLoader if not everything is cached,
+        #  because workers might crash for unknown reasons.
+        # Instead, make a call to `cache_all` first,
+        #  and use the dataset with transform=None.
+        self.root_dir = Path(root_dir)
+        self.training = training
+        self.mode = 'train' if self.training else 'test'
+        self.transform = transform
+        self.cache_fetched = cache_fetched
         
-        self.root = data_root
-        self.mode = mode
-        self.v_transforms = video_transforms
-        
-        # Build database of samples
-        self._build_db()
-        
-        # Features precomute functionality
-        self.pre = use_precomputed
-        self.pre_root = os.path.join(self.root, "precomp")
-        if self.pre and not os.path.exists(self.pre_root):
-            os.makedirs(self.pre_root)
-        
-    def _build_db(self):
-        '''
-        Parse train/test csv containing paths to videos and corresponding labels.
-        Also, assign a unique index to each category
-        '''
-        csv_file = os.path.join(self.root, self.mode + ".csv")
-        self.db: np.ndarray = pd.read_csv(csv_file, header=0).values
-        
-        unique_categories = np.sort(np.unique(self.db.T[1]))
-        self.categories = {c_name: c_idx for c_idx, c_name in enumerate(unique_categories)}
-        
-    def compute_sample(self, video_name, category):
-        '''
-        For a specific video, read data into memory, permute data to NumFrames x Channels x Height x Width format.
-        Also, transform data according to list of transforms
-        '''
-        
-        # Load video
-        V, *_ = read_video(os.path.join(self.root, self.mode, video_name))
-        # Permute data to NxCxHxW from NxHxWxC
-        V = V.permute(0,3,1,2)
-        
-        for T in self.v_transforms:
-            V = T(V)
-        
-        return V, self.categories[category]
-        
-    def __getitem__(self, index):
-        '''
-        Retrieve a specific sample from the dataset
-        '''
-        video_name, category = self.db[index]
-        
-        hval = "_".join([
-            self.mode,
-            video_name
-        ])
-        
-        if os.path.exists(os.path.join(self.pre_root, f"{hval}.tmp")):
-            with open(os.path.join(self.pre_root, f"{hval}.tmp"), "rb") as f:
-                sample =  pickle.load(f)
+        # Create a directory to cache fetched videos, if appropriate
+        if self.cache_fetched:
+            self.cache_dir = self.root_dir / f'{self.__class__.__name__}_cache'
+            (self.cache_dir / self.mode).mkdir(parents=True, exist_ok=cache_exist_ok)
         else:
-            sample = self.compute_sample(video_name, category)
-            # Save tmp
-            with open(os.path.join(self.pre_root, f"{hval}.tmp"), "wb") as f:
-                pickle.dump(sample, f)
+            self.cache_dir = None
+        
+        # Load the video filenames, and their respective labels
+        csv_path = self.root_dir/ f'{self.mode}.csv'
+        csv_ = np.genfromtxt(csv_path, delimiter=',', names=True, dtype=None, encoding=None)
+        self.filenames = csv_['video_name']
+        self.class_names, ys = np.unique(csv_['tag'], return_inverse=True)
+        self.ys = torch.as_tensor(ys)
+        
+        # Move the transform to gpu, if it's Module.
+        if isinstance(self.transform, nn.Module):
+            self.device = torch.device('cuda:0' if cuda else 'cpu')
+            self.transform.to(self.device)
+        else:
+            self.device = None
             
-        return sample
-            
+    def __getitem__(self, idx):
+        file_name = Path(self.filenames[idx])
+        y = self.ys[idx]
+        
+        file_path = self.root_dir / self.mode / file_name
+        
+        if self.cache_fetched:
+            cache_path = self.cache_dir / self.mode / file_name.with_suffix('.npy')
+            if cache_path.exists():
+                x = np.load(cache_path)
+            else:
+                x = self.read_transform_video(file_path)
+                np.save(cache_path, x)
+        else:
+            x = self.read_transform_video(file_path)
+        
+        x = torch.as_tensor(x)
+        return x, y
+    
     def __len__(self):
-        '''
-        Returns the number of samples in the dataset
-        '''
-        return self.db.shape[0]
+        return len(self.filenames)
+    
+    def read_transform_video(self, file_path):
+        x, *_ = read_video(str(file_path), output_format='TCHW', pts_unit='sec')
+        if self.transform is not None:
+            if isinstance(self.transform, nn.Module):
+                x = x.to(self.device)
+            x = self.transform(x).cpu()
+        return x
 
 
-class Seq2Vec(pl.LightningModule):
-    def __init__(self, features_in, num_classes, learning_rate=1e-3):
-        '''
-        Returns a Seq2Vec RNN model
-        '''
+class ResNet50ExtractorVideo(nn.Module):
+    
+    def __init__(self):
         super().__init__()
-        
-        self.rnn_encoder = nn.GRU(
-            input_size=features_in,
-            hidden_size=32,
-            num_layers=2,
-            batch_first=False,
-            dropout=0.3)
-        
-        self.classifier = nn.Sequential(
-            nn.Linear(32, 16),
-            nn.ReLU(),
-            nn.Linear(16, num_classes)
-        )
-        
-        self.lr = learning_rate
+        self.weights = ResNet18_Weights.IMAGENET1K_V1
+        self.preprocessor = self.weights.transforms()
+        model = resnet18(weights=self.weights)
+        self.extractor = create_feature_extractor(model, ['flatten'])
+        self.extractor.eval()
+    
+    @torch.inference_mode()
+    def forward(self, vid):
+        need_squeeze = False
+        if vid.ndim < 5:
+            vid = vid.unsqueeze(dim=0)
+            need_squeeze = True
+        n, t, c, h, w = vid.shape
+        vid = vid.view(-1, c, h, w)
 
-        self.val_accuracy = Accuracy()        
+        vid = self.preprocessor(vid)
+        vid = self.extractor(vid)['flatten']
+
+        vid = vid.view(n, t, -1)
+        if need_squeeze:
+            vid = vid.squeeze(dim=0)
+        return vid
+    
+    
+def cache_all(source_root_dir):
+    """Call this first to avoid errors in data loading"""
+    cuda = torch.cuda.is_available()
+    transform = ResNet50ExtractorVideo()
+    dataset_train = Ucf101(
+        root_dir=source_root_dir, training=True, transform=transform,
+        cache_fetched=True, cache_exist_ok=True, cuda=cuda
+    )
+    dataset_test = Ucf101(
+        root_dir=source_root_dir, training=False, transform=transform,
+        cache_fetched=True, cache_exist_ok=True, cuda=cuda
+    )
+
+    for dataset in dataset_train, dataset_test:
+        for x, y in dataset:
+            pass
+
+
+def plot_transformed(video_path):
+    vid, *_ = read_video(video_path, output_format='TCHW', pts_unit='sec')
+    preprocessor = ResNet18_Weights.IMAGENET1K_V1.transforms()
+    preprocessed = preprocessor(vid)
+    
+    vid = np.transpose(vid, (0, 2, 3, 1))
+    preprocessed = np.transpose(preprocessed, (0, 2, 3, 1))
+    
+    fig, axs = plt.subplots(nrows=10, ncols=2, figsize=(8,16))
+    fig.set_tight_layout(True)
+    for i in range(10):
+        axs[i, 0].imshow(vid[i])
+        axs[i, 1].imshow(preprocessed[i])
+        axs[i, 0].set_axis_off()
+        axs[i, 1].set_axis_off()
+        
+        
+def split_dataset(dataset, train_size, test_size=0., seed=None):
+    """Splits a PyTorch Dataset into train, validation and test Subsets."""
+    if not 0 <= train_size + test_size <= 1:
+        raise ValueError('Invalid train/test sizes')
+    n = len(dataset)
+    n_train = int(train_size * n)
+    n_test = int(test_size * n)
+    n_val = n - (n_train + n_test)
+    generator = torch.Generator()
+    if seed is not None:
+        generator.manual_seed(seed)
+    dataset_train, dataset_val, dataset_test = random_split(
+        dataset, [n_train, n_val, n_test], generator)
+    return dataset_train, dataset_val, dataset_test
+
+
+def rnn_collate_fn(batch):
+    seqs, y = map(list, zip(*batch))
+    padded = pad_sequence(seqs, batch_first=True)
+    y = torch.stack(y)
+    return padded, y
+
+
+# %%
+class GRUClassifier(pl.LightningModule):
+    
+    def __init__(
+        self, input_size, rnn_size, dense_size, num_classes,
+        num_rnn_layers=2, rnn_dropout=0.2, lr=1e-3,
+    ):
+        super().__init__()
         self.save_hyperparameters()
         
+        self.gru = nn.GRU(
+            input_size=input_size,
+            hidden_size=rnn_size,
+            num_layers=num_rnn_layers,
+            dropout=rnn_dropout,
+            batch_first=True,
+        )
+        self.classifier = nn.Sequential(
+            nn.Linear(rnn_size, dense_size),
+            nn.ReLU(),
+            nn.Linear(dense_size, num_classes),
+        )
+        self.lr = lr
+        self.train_accuracy = Accuracy(num_classes=num_classes)
+        self.val_accuracy = Accuracy(num_classes=num_classes)
+        self.test_accuracy = Accuracy(num_classes=num_classes)
+        
     def forward(self, x):
-        '''
-        Forward-pass
-        '''
-        rnn_out, h_n = self.rnn_encoder(x)
-        #  rnn_out: L, B, 32
-        return self.classifier(rnn_out[-1])
-
+        x, _ = self.gru(x)
+        x = x[:, -1, :]
+        x = self.classifier(x)
+        return x
+    
     def training_step(self, batch, batch_idx):
-        '''
-        Training logic
-        '''
-        X, y = batch
-
-        logits = self(X)
-
-        loss = F.nll_loss(torch.log_softmax(logits, dim=-1), y)
-        self.log("loss/train", loss, on_epoch=True, on_step=False, batch_size=X.size()[1])
-
+        x, y = batch
+        logits = self(x)
+        loss = F.cross_entropy(logits, y)
+        self.train_accuracy(logits, y)
+        self.log_dict({'loss/train': loss, 'accuracy/train': self.train_accuracy})
         return loss
     
     def validation_step(self, batch, batch_idx):
-        '''
-        Validation logic
-        '''
-        X, y = batch
-
-        logits = self(X)
-
-        loss = F.nll_loss(torch.log_softmax(logits, dim=-1), y)
-        self.log("loss/val", loss, on_epoch=True, on_step=False, batch_size=X.size()[1])
-
+        x, y = batch
+        logits = self(x)
+        loss = F.cross_entropy(logits, y)
         self.val_accuracy(logits, y)
-        self.log("accuracy/val", self.val_accuracy, on_epoch=True, on_step=False, batch_size=X.size()[1])
+        self.log_dict({'loss/val': loss, 'accuracy/val': self.val_accuracy})
+        
+    def test_step(self, batch, batch_idx):
+        x, y = batch
+        logits = self(x)
+        loss = F.cross_entropy(logits, y)
+        self.test_accuracy(logits, y)
+        self.log_dict({'loss/test': loss, 'accuracy/test': self.test_accuracy})
+        
+    def predict_step(self, batch, batch_idx):
+        x, _ = batch
+        logits = self(x)
+        pred = torch.argmax(logits, dim=1)
+        return pred
     
     def configure_optimizers(self):
-        '''
-        Setup Adam optimizer
-        '''
-        return torch.optim.Adam(self.parameters(), lr=self.lr)
-    
-    
-def compute_features() -> VTransform:
-    '''
-    Returns a VTransform object that uses a pretrained CNN to extract features
-    '''
-    # Instantiate a CNN for feature extraction
-    encoder = resnet18(pretrained=True, progress=False)
-    # model = nn.Sequential(*list(encoder.children())[:-1], nn.Flatten())
-    model = create_feature_extractor(encoder, ["avgpool"])
-    model.eval()
-    
-    def apply(v: torch.Tensor) -> torch.Tensor:    
-        # return model(v)
-        with torch.no_grad():
-            feats = torch.flatten(model(v)["avgpool"], 1)
-        return feats
-    
-    return apply
+        optimizer = torch.optim.Adam(self.parameters(), lr=self.lr)
+        return optimizer
 
 
-def pad_sequences_collate_fn(samples: List[tuple]) -> tuple:
-    '''
-    Zero-pad (in front) each sample to enable batching. The longest sequence defines the sequence length for the batch
-    '''
-    
-    labels = torch.stack([torch.tensor(v[1]) for v in samples])
-    data = pad_sequence([v[0] for v in samples])
-    
-    return data, labels
-    
+seed = 7
+root_dir = 'data'
+# cache_all(root_dir)
+transform = None  # Hack to save some memory
+
+dataset_train = Ucf101(
+    root_dir=root_dir, training=True, transform=transform,
+    cache_fetched=True, cache_exist_ok=True,
+)
+dataset_test_original = Ucf101(
+    root_dir=root_dir, training=False, transform=transform,
+    cache_fetched=True, cache_exist_ok=True,
+)
+dataset_val, dataset_test, _ = split_dataset(dataset_test_original, 0.5, seed=seed)
+
+loader_train_rnn = DataLoader(
+    dataset_train, shuffle=True, collate_fn=rnn_collate_fn,
+    batch_size=16, num_workers=2,
+)
+loader_val_rnn = DataLoader(
+    dataset_val, shuffle=False, collate_fn=rnn_collate_fn,
+    batch_size=16, num_workers=2,
+)
+loader_test_rnn = DataLoader(
+    dataset_test, shuffle=False, collate_fn=rnn_collate_fn,
+    batch_size=16, num_workers=2,
+)
+
+rnn = GRUClassifier(
+    input_size=512,
+    rnn_size=32,
+    dense_size=16,
+    num_classes=5,
+    num_rnn_layers=2,
+    lr=1e-3,
+)
+callbacks = [
+    EarlyStopping(monitor='loss/val', mode='min', patience=20),
+    ModelCheckpoint(monitor='loss/val', mode='min', save_last=True)
+]
+trainer = pl.Trainer(
+    accelerator='gpu',
+    min_epochs=1,
+    max_epochs=100,
+    callbacks=callbacks,
+    default_root_dir='rnn_results'
+)
 
 # %%
-DATA_ROOT = "data/"
+trainer.fit(rnn, train_dataloaders=loader_train_rnn, val_dataloaders=loader_val_rnn)
 
-train_dset = UCF101(
-    DATA_ROOT,
-    "train",
-    video_transforms=[
-        ConvertImageDtype(torch.float32),
-        Resize((224, 224)),
-        Normalize(
-            mean=[0.485, 0.456, 0.406],
-            std=[0.229, 0.224, 0.225]
-        ),
-        compute_features(),
-    ]
-)
+# %%
+best_rnn = trainer.model.load_from_checkpoint(trainer.checkpoint_callback.best_model_path)
 
-val_dset = UCF101(
-    DATA_ROOT,
-    "test",
-    video_transforms=[
-        ConvertImageDtype(torch.float32),
-        Resize((224, 224)),
-        Normalize(
-            mean=[0.485, 0.456, 0.406],
-            std=[0.229, 0.224, 0.225]
-        ),
-        compute_features(),
-    ]
-)
+trainer.test(best_rnn, loader_test_rnn)
 
-train_dloader = DataLoader(train_dset, batch_size=16, collate_fn=pad_sequences_collate_fn, shuffle=True, num_workers=4)
-val_dloader = DataLoader(val_dset, batch_size=16, collate_fn=pad_sequences_collate_fn, shuffle=False, num_workers=4)
+# %%
+class_names = dataset_train.class_names
+y_true = torch.cat([y for _, y in loader_test_rnn])
+y_pred = torch.cat(trainer.predict(best_rnn, loader_test_rnn))
+print(classification_report(y_true, y_pred, target_names=class_names))
+ConfusionMatrixDisplay.from_predictions(y_true, y_pred, display_labels=class_names, xticks_rotation='vertical')
+plt.show()
 
-callbacks = [
-    EarlyStopping(monitor="accuracy/val", mode="max", patience=50),
-    ModelCheckpoint(monitor="accuracy/val", mode="max", save_last=True)
-]
-
-model = Seq2Vec(512, len(train_dset.categories), learning_rate=1e-4)
-trainer = pl.Trainer(
-    accelerator="gpu", 
-    devices=1,
-    min_epochs=300,
-    max_epochs=1000,
-    callbacks=callbacks,
-    default_root_dir="seq2vec_gru"
-)
-
-trainer.fit(model, train_dataloaders=train_dloader, val_dataloaders=val_dloader)
-
-# # %%
-# for x, y in train_dset:
-#     pass
-# for x, y in val_dset:
-#     pass
+# %%
