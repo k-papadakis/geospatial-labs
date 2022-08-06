@@ -224,7 +224,7 @@ def main():
     )
     output_dir = Path('output')
     output_dir.mkdir(exist_ok=True)
-    DEVICE = 'gpu' if torch.cuda.is_available() else 'cpu'
+    accelerator = 'gpu' if torch.cuda.is_available() else 'cpu'
     
     # LOAD THE IMAGES AND THEIR INFO
     images, label_images = read_data(train_x_paths, train_y_paths)
@@ -302,18 +302,18 @@ def main():
     print('\nTraining Random Forest and SVM...')
     train_evaluate_traditional(images, label_images, names=classnames[1:], random_state=random_state)
     print('\nTraining MLP...')
-    train_mlp(images, label_images, names=classnames[1:], random_state=random_state, epochs=2_000, accelerator=DEVICE, output_dir=output_dir)
+    train_mlp(images, label_images, names=classnames[1:], random_state=random_state, epochs=200, accelerator=accelerator, output_dir=output_dir)
     print('\nTraining CNN...')
-    train_cnn(patch_loader_train_aug, patch_loader_val, patch_loader_test, names=classnames[1:], epochs=2_000, accelerator=DEVICE, output_dir=output_dir)
+    train_cnn(patch_loader_train_aug, patch_loader_val, patch_loader_test, names=classnames[1:], epochs=200, accelerator=accelerator, output_dir=output_dir)
     print('\nTraining ResNet...')
-    train_resnet(rgb_loader_train_aug, rgb_loader_val, rgb_loader_test, names=classnames[1:], freeze_head=False, epochs=2_000, accelerator=DEVICE, output_dir=output_dir)
+    train_resnet(rgb_loader_train_aug, rgb_loader_val, rgb_loader_test, names=classnames[1:], freeze_head=False, epochs=200, accelerator=accelerator, output_dir=output_dir)
     print('\nTraining U-Net...')
-    train_unet(cropped_loader_train_aug, cropped_loader_val, cropped_loader_test, names=classnames[1:], epochs=2_000, accelerator=DEVICE, output_dir=output_dir)
+    train_unet(cropped_loader_train_aug, cropped_loader_val, cropped_loader_test, names=classnames[1:], epochs=500, accelerator=accelerator, output_dir=output_dir)
 
     print('\nTraining CNN on all the data')
-    train_cnn(patch_loader_full, None, None, names=classnames[1:], epochs=2_000, accelerator=DEVICE, output_dir=output_dir)
-    print('\nTraining U-Net on all the data')
-    train_unet_overlap(crop_size=64, stride=32, images=images, label_images=label_images, epochs=2_000, batch_size=16, accelerator=DEVICE)
+    train_cnn(patch_loader_full, None, None, names=classnames[1:], epochs=400, accelerator=accelerator, output_dir=output_dir)  # 4.08 hours
+    print('\nTraining U-Net on all the data + overlap')  # 8 times the non-overlap dataset  # 4.36 hours
+    train_unet_overlap(crop_size=64, stride=16, images=images, label_images=label_images, epochs=400, batch_size=16, accelerator=accelerator)
 
     print('\nPredicting unlabelled data with CNN')
     ckpt_path_cnn = list((output_dir / 'cnn_results_full').glob('**/*.ckpt'))[-1]
@@ -322,7 +322,7 @@ def main():
     predict_all_images_cnn(
         paths=validation_x_paths, model=model, batch_size=64,
         cmap=cmap, norm=norm, classnames=classnames, rgb=rgb,
-        accelerator=DEVICE, output_dir=output_dir
+        accelerator=accelerator, output_dir=output_dir
     )
 
     print('\nPredicting unlabelled data with UNet')
