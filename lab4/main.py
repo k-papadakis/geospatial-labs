@@ -1,6 +1,7 @@
 # %%
 from pathlib import Path
 import re
+import json
 
 import numpy as np
 import matplotlib.pyplot as plt
@@ -18,9 +19,9 @@ from torchvision.models.feature_extraction import create_feature_extractor
 
 import pytorch_lightning as pl
 from pytorch_lightning.callbacks import EarlyStopping, ModelCheckpoint
-from torchmetrics import Accuracy 
+from torchmetrics import Accuracy
 
-# %%
+
 class Ucf101(Dataset):
     
     def __init__(
@@ -154,26 +155,28 @@ def plot_transformed(video_path):
         axs[i, 1].set_axis_off()
 
 
-def test_val_split(n_groups_test):
+def test_val_split(dataset_test_original, n_groups_test):
     """Splits test UCF101 dataset into test and validation datasets.
     
     Every class in the test UCF101 directory has 7 video groups,
     and every video group has 7 videos,
-    which are cuts of the a single original video.
+    which are cuts of a single original video.
     The first `n_groups_test` video groups of each class will comprise our test set,
     and the rest `7 - n_groups` video groups will comprise our validation set.
     """
-    p = re.compile(rf'v_[a-zA-Z]*_g0[1-{n_groups_test}]')
+    p = re.compile(r'v_[a-zA-Z]*_g(\d+)_')
     test_indices, val_indices = [], []
     for i, s in enumerate(dataset_test_original.filenames):
-        if p.match(s):
+        video_group_str = p.match(s).group(1)
+        video_group = int(video_group_str)
+        if video_group <= n_groups_test:
             test_indices.append(i)
         else:
             val_indices.append(i)
 
     dataset_test = Subset(dataset_test_original, test_indices)
     dataset_val = Subset(dataset_test_original, val_indices)
-
+    
     return dataset_test, dataset_val
 
 
@@ -184,12 +187,11 @@ def rnn_collate_fn(batch):
     return padded, y
 
 
-# %%
 class GRUClassifier(pl.LightningModule):
     
     def __init__(
         self, input_size, rnn_size, dense_size, num_classes,
-        num_rnn_layers=2, rnn_dropout=0.2, lr=1e-3,
+        num_rnn_layers=2, rnn_dropout=0.1, lr=1e-3,
     ):
         super().__init__()
         self.save_hyperparameters()
@@ -250,68 +252,90 @@ class GRUClassifier(pl.LightningModule):
         return optimizer
 
 
-root_dir = 'data'
+def train_evaluate(trainer, model, loader_train, loader_val, loader_test, class_names, output_dir):
+    
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    
+    trainer.fit(model, train_dataloaders=loader_train, val_dataloaders=loader_val)
+    
+    best_model = trainer.model.load_from_checkpoint(trainer.checkpoint_callback.best_model_path)
+    trainer.test(best_model, loader_test)
+
+    y_true = torch.cat([y for _, y in loader_test])
+    y_pred = torch.cat(trainer.predict(best_model, loader_test))
+
+    d = classification_report(y_true, y_pred, target_names=class_names, output_dict=True)
+    with open(output_dir/'classification_report.json', 'w') as f:
+        json.dump(d, f, indent=4)
+    
+    fig, ax = plt.subplots()
+    ConfusionMatrixDisplay.from_predictions(
+        y_true, y_pred, display_labels=class_names, xticks_rotation=90, ax=ax
+    )
+    ax.set_title(best_model.__class__.__name__)
+    fig.savefig(output_dir/'confusion_matrix.png', facecolor='white', bbox_inches='tight')
+    
+    
+def train_evaluate_rnn(
+    dataset_train, dataset_val, dataset_test,
+    max_epochs=200, patience=50, lr=1e-3, output_dir='output/rnn'
+):
+    loader_train_rnn = DataLoader(
+        dataset_train, shuffle=True, collate_fn=rnn_collate_fn,
+        batch_size=32, num_workers=2,
+    )
+    loader_val_rnn = DataLoader(
+        dataset_val, shuffle=False, collate_fn=rnn_collate_fn,
+        batch_size=32, num_workers=2,
+    )
+    loader_test_rnn = DataLoader(
+        dataset_test, shuffle=False, collate_fn=rnn_collate_fn,
+        batch_size=32, num_workers=2,
+    )
+
+    rnn = GRUClassifier(
+        input_size=512,
+        rnn_size=32,
+        dense_size=16,
+        num_classes=5,
+        num_rnn_layers=2,
+        lr=lr,
+    )
+    callbacks = [
+        EarlyStopping(monitor='loss/val', mode='min', patience=patience),
+        ModelCheckpoint(monitor='loss/val', mode='min', save_last=True)
+    ]
+    trainer = pl.Trainer(
+        accelerator='gpu' if torch.cuda.is_available() else 'cpu',
+        min_epochs=1,
+        max_epochs=max_epochs,
+        callbacks=callbacks,
+        log_every_n_steps=10,
+        default_root_dir=output_dir,
+    )
+    
+    train_evaluate(
+        trainer=trainer, model=rnn, loader_train=loader_train_rnn, loader_val=loader_val_rnn,
+        loader_test=loader_test_rnn, class_names=dataset_train.class_names, output_dir=output_dir,
+    )
+
+# %%
+data_root_dir = 'data'
 # cache_all(root_dir)
-transform = None  # Hack to save some memory
+transform = None  # Hack to save some memory. Requires cache_all(root_dir),
 
 dataset_train = Ucf101(
-    root_dir=root_dir, training=True, transform=transform,
+    root_dir=data_root_dir, training=True, transform=transform,
     cache_fetched=True, cache_exist_ok=True,
-)
+)  # 594 samples
 dataset_test_original = Ucf101(
-    root_dir=root_dir, training=False, transform=transform,
+    root_dir=data_root_dir, training=False, transform=transform,
     cache_fetched=True, cache_exist_ok=True,
-)
-dataset_test, dataset_val = test_val_split(4)
+)  # 224 samples
+dataset_test, dataset_val = test_val_split(dataset_test_original, 4)  # 121, 103 samples
 
-
-loader_train_rnn = DataLoader(
-    dataset_train, shuffle=True, collate_fn=rnn_collate_fn,
-    batch_size=16, num_workers=2,
-)
-loader_val_rnn = DataLoader(
-    dataset_val, shuffle=False, collate_fn=rnn_collate_fn,
-    batch_size=16, num_workers=2,
-)
-loader_test_rnn = DataLoader(
-    dataset_test, shuffle=False, collate_fn=rnn_collate_fn,
-    batch_size=16, num_workers=2,
-)
-
-rnn = GRUClassifier(
-    input_size=512,
-    rnn_size=32,
-    dense_size=16,
-    num_classes=5,
-    num_rnn_layers=2,
-    lr=1e-3,
-)
-callbacks = [
-    EarlyStopping(monitor='loss/val', mode='min', patience=50),
-    ModelCheckpoint(monitor='loss/val', mode='min', save_last=True)
-]
-trainer = pl.Trainer(
-    accelerator='gpu',
-    min_epochs=1,
-    max_epochs=200,
-    callbacks=callbacks,
-    default_root_dir='rnn_results'
-)
+train_evaluate_rnn(dataset_train, dataset_val, dataset_test)
 
 # %%
-trainer.fit(rnn, train_dataloaders=loader_train_rnn, val_dataloaders=loader_val_rnn)
 
-# %%
-best_rnn = trainer.model.load_from_checkpoint(trainer.checkpoint_callback.best_model_path)
-
-trainer.test(best_rnn, loader_test_rnn)
-
-# %%
-class_names = dataset_train.class_names
-y_true = torch.cat([y for _, y in loader_test_rnn])
-y_pred = torch.cat(trainer.predict(best_rnn, loader_test_rnn))
-print(classification_report(y_true, y_pred, target_names=class_names))
-ConfusionMatrixDisplay.from_predictions(y_true, y_pred, display_labels=class_names, xticks_rotation='vertical')
-plt.show()
-
-# %%
