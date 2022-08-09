@@ -55,7 +55,7 @@ class Ucf101(Dataset):
         self.class_names, ys = np.unique(csv_['tag'], return_inverse=True)
         self.ys = torch.as_tensor(ys)
         
-        # Move the transform to gpu, if it's Module.
+        # Move the transform to gpu, if it is a Module.
         if isinstance(self.transform, nn.Module):
             self.device = torch.device('cuda:0' if cuda else 'cpu')
             self.transform.to(self.device)
@@ -370,7 +370,7 @@ def train_evaluate(trainer, model, loader_train, loader_val, loader_test, class_
     
 def train_evaluate_rnn(
     dataset_train, dataset_val, dataset_test,
-    max_epochs=300, patience=30, lr=1e-3, output_dir='output/rnn'
+    max_epochs=300, patience=50, lr=1e-3, output_dir='output/rnn'
 ):
     loader_train_rnn = DataLoader(
         dataset_train, shuffle=True, collate_fn=rnn_collate_fn,
@@ -411,10 +411,9 @@ def train_evaluate_rnn(
     )
 
 
-
 def train_evaluate_transformer(
     dataset_train, dataset_val, dataset_test,
-    max_epochs=300, patience=30, lr=1e-3, output_dir='output/transformer'
+    max_epochs=300, patience=50, lr=1e-3, output_dir='output/transformer'
 ):
     loader_train_transformer = DataLoader(
         dataset_train, shuffle=True, collate_fn=transformer_collate_fn,
@@ -458,7 +457,9 @@ def train_evaluate_transformer(
     
 
 def main():
+    pl.utilities.seed.seed_everything(42)
     data_root_dir = 'data'
+    
     cache_all(data_root_dir)
     transform = None  # Hack to save some memory. Requires cache_all(root_dir),
 
@@ -479,5 +480,3 @@ def main():
     
 if __name__ == '__main__':
     main()
-
-# %%
