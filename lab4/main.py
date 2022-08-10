@@ -216,30 +216,33 @@ class LightningClassifier(pl.LightningModule):
         self.val_accuracy = Accuracy(num_classes=num_classes)
         self.test_accuracy = Accuracy(num_classes=num_classes)
     
-    def _get_logits_and_target(self, batch):
-        raise NotImplementedError
+    def get_logits_and_target(self, batch):
+        raise NotImplementedError(
+            f'LightningClassifier [{type(self).__name__}] is missing'
+            'the required \"get_logits_and_target\" function'
+        )
     
     def training_step(self, batch, batch_idx):
-        logits, y = self._get_logits_and_target(batch)
+        logits, y = self.get_logits_and_target(batch)
         loss = F.cross_entropy(logits, y)
         self.train_accuracy(logits, y)
         self.log_dict({'loss/train': loss, 'accuracy/train': self.train_accuracy})
         return loss
     
     def validation_step(self, batch, batch_idx):
-        logits, y = self._get_logits_and_target(batch)
+        logits, y = self.get_logits_and_target(batch)
         loss = F.cross_entropy(logits, y)
         self.val_accuracy(logits, y)
         self.log_dict({'loss/val': loss, 'accuracy/val': self.val_accuracy})
         
     def test_step(self, batch, batch_idx):
-        logits, y = self._get_logits_and_target(batch)
+        logits, y = self.get_logits_and_target(batch)
         loss = F.cross_entropy(logits, y)
         self.test_accuracy(logits, y)
         self.log_dict({'loss/test': loss, 'accuracy/test': self.test_accuracy})
         
     def predict_step(self, batch, batch_idx):
-        logits, _ = self._get_logits_and_target(batch)
+        logits, _ = self.get_logits_and_target(batch)
         pred = torch.argmax(logits, dim=1)
         return pred
     
@@ -247,8 +250,8 @@ class LightningClassifier(pl.LightningModule):
 class GRUClassifier(LightningClassifier):
     
     def __init__(
-        self, input_size, rnn_size, num_classes,
-        num_rnn_layers=2, dropout=0.1, lr=1e-3,
+        self, input_size, rnn_size, num_classes, num_rnn_layers,
+        dropout=0.1, lr=1e-3,
     ):
         super().__init__(num_classes)
         self.save_hyperparameters()
@@ -275,7 +278,7 @@ class GRUClassifier(LightningClassifier):
         optimizer = torch.optim.Adam(self.parameters(), lr=self.lr)
         return optimizer
     
-    def _get_logits_and_target(self, batch):
+    def get_logits_and_target(self, batch):
         x, y = batch
         logits = self(x)
         return logits, y
@@ -283,7 +286,7 @@ class GRUClassifier(LightningClassifier):
 
 class PositionalEncoder(nn.Module):
     
-    def __init__(self, d_model: int, max_len):
+    def __init__(self, d_model, max_len):
         super().__init__()
         
         pos = torch.arange(max_len).unsqueeze(1)
@@ -335,7 +338,7 @@ class TransformerClassifier(LightningClassifier):
         optimizer = torch.optim.Adam(self.parameters(), lr=self.lr)
         return optimizer
     
-    def _get_logits_and_target(self, batch):
+    def get_logits_and_target(self, batch):
         x, src_key_padding_mask, y = batch
         logits = self(x, src_key_padding_mask=src_key_padding_mask)
         return logits, y
