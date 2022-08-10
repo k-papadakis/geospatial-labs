@@ -1,45 +1,45 @@
 {
     "CricketShot": {
-        "precision": 0.9642857142857143,
-        "recall": 0.9642857142857143,
-        "f1-score": 0.9642857142857143,
-        "support": 28
+        "precision": 0.9423076923076923,
+        "recall": 1.0,
+        "f1-score": 0.9702970297029703,
+        "support": 49
     },
     "PlayingCello": {
         "precision": 1.0,
         "recall": 1.0,
         "f1-score": 1.0,
-        "support": 25
+        "support": 44
     },
     "Punch": {
-        "precision": 0.6666666666666666,
-        "recall": 0.7777777777777778,
-        "f1-score": 0.717948717948718,
-        "support": 18
+        "precision": 1.0,
+        "recall": 0.9487179487179487,
+        "f1-score": 0.9736842105263158,
+        "support": 39
     },
     "ShavingBeard": {
-        "precision": 0.88,
+        "precision": 0.9772727272727273,
         "recall": 1.0,
-        "f1-score": 0.9361702127659575,
-        "support": 22
+        "f1-score": 0.9885057471264368,
+        "support": 43
     },
     "TennisSwing": {
-        "precision": 0.9545454545454546,
-        "recall": 0.75,
-        "f1-score": 0.84,
-        "support": 28
+        "precision": 1.0,
+        "recall": 0.9591836734693877,
+        "f1-score": 0.9791666666666666,
+        "support": 49
     },
-    "accuracy": 0.9008264462809917,
+    "accuracy": 0.9821428571428571,
     "macro avg": {
-        "precision": 0.8930995670995671,
-        "recall": 0.8984126984126984,
-        "f1-score": 0.891680929000078,
-        "support": 121
+        "precision": 0.983916083916084,
+        "recall": 0.9815803244374675,
+        "f1-score": 0.9823307308044779,
+        "support": 224
     },
     "weighted avg": {
-        "precision": 0.9098121712997747,
-        "recall": 0.9008264462809917,
-        "f1-score": 0.901147285982876,
-        "support": 121
+        "precision": 0.9830169830169829,
+        "recall": 0.9821428571428571,
+        "f1-score": 0.9821569306208718,
+        "support": 224
     }
 }

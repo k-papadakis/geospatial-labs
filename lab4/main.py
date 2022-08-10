@@ -2,6 +2,7 @@ from pathlib import Path
 import re
 import json
 
+import random
 import numpy as np
 import matplotlib.pyplot as plt
 
@@ -156,29 +157,55 @@ def plot_transformed(video_path, nframes=10):
         axs[i, 1].set_axis_off()
 
 
-def test_val_split(dataset_test_original, n_groups_test):
-    """Splits test UCF101 dataset into test and validation datasets.
+def train_val_split(dataset_train_original, n_groups_val, seed=None):
+    """Splits train UCF101 dataset into train and validation datasets.
     
-    Every class in the test UCF101 directory has 7 video groups,
-    and every video group has 7 videos,
-    which are cuts of a single original video.
-    The first `n_groups_test` video groups of each class will comprise our test set,
-    and the rest `7 - n_groups` video groups will comprise our validation set.
+    Every class in the train UCF101 directory has 18 video groups,
+    and every video group has roughly the same amount of videos, which are cuts of a single original video.
+    A random selection of `n_groups_val` video groups of each class will comprise our validation set,
+    and the remaining `18 - n_groups_val` video groups will comprise our validation set.
     """
-    p = re.compile(r'v_[a-zA-Z]*_g(\d+)_')
-    test_indices, val_indices = [], []
-    for i, s in enumerate(dataset_test_original.filenames):
-        video_group_str = p.match(s).group(1)
-        video_group = int(video_group_str)
-        if video_group <= n_groups_test:
-            test_indices.append(i)
-        else:
-            val_indices.append(i)
-
-    dataset_test = Subset(dataset_test_original, test_indices)
-    dataset_val = Subset(dataset_test_original, val_indices)
+    # >>> import pandas as pd
+    # >>> video_names = pd.read_csv('data/train.csv')['video_name']
+    # >>> pattern = r'v_(?P<label>[a-zA-Z]*)_g(?P<group>\d+)_c(?P<cut>\d+)'
+    # >>> df = video_names.str.extract(pattern)
+    # >>> df = df.astype({'group': int, 'cut': int})
+    # >>> df = df.sort_values(by=['label', 'group', 'cut'])
+    # >>> df.groupby(['label', 'group'])['cut'].count().value_counts()
+    # 7    64
+    # 6    19
+    # 5     4
+    # 4     3
+    # Name: cut, dtype: int64
+    # >>> df.groupby('label')['group'].agg(['min', 'max', 'nunique', 'count'])
+    #               min  max  nunique  count
+    # label                                 
+    # CricketShot     8   25       18    118
+    # PlayingCello    8   25       18    120
+    # Punch           8   25       18    121
+    # ShavingBeard    8   25       18    118
+    # TennisSwing     8   25       18    117
     
-    return dataset_test, dataset_val
+    if seed is not None:
+        random.seed(seed)
+    val_video_groups = set(random.sample(range(8, 26), n_groups_val))
+    print(f'Making validation set from video groups {sorted(val_video_groups)}')
+    p = re.compile(r'v_[a-zA-Z]*_g(\d+)_')
+    train_indices, val_indices = [], []
+    
+    for i, s in enumerate(dataset_train_original.filenames):
+        video_group = int(p.match(s).group(1))
+        if video_group in val_video_groups:
+            val_indices.append(i)
+        else:
+            train_indices.append(i)
+
+    dataset_train = Subset(dataset_train_original, train_indices)
+    dataset_val = Subset(dataset_train_original, val_indices)
+    
+    dataset_train.class_names = dataset_val.class_names = dataset_train_original.class_names
+    
+    return dataset_train, dataset_val
 
 
 def rnn_collate_fn(batch):
@@ -458,7 +485,7 @@ def train_evaluate_transformer(
         loader_test=loader_test_transformer, class_names=dataset_train.class_names, output_dir=output_dir,
     )
     
-
+    
 def main():
     pl.utilities.seed.seed_everything(42)
     data_root_dir = 'data'
@@ -466,20 +493,21 @@ def main():
     cache_all(data_root_dir)
     transform = None  # Hack to save some memory. Requires cache_all(root_dir),
 
-    dataset_train = Ucf101(
+    dataset_train_original = Ucf101(
         root_dir=data_root_dir, training=True, transform=transform,
         cache_fetched=True, cache_exist_ok=True,
     )  # 594 samples
-    dataset_test_original = Ucf101(
+    dataset_train, dataset_val = train_val_split(dataset_train_original, 3)  # ~ (15/18, 3/18) * 594 = (495, 99) samples
+    dataset_test = Ucf101(
         root_dir=data_root_dir, training=False, transform=transform,
         cache_fetched=True, cache_exist_ok=True,
     )  # 224 samples
-    dataset_test, dataset_val = test_val_split(dataset_test_original, 4)  # 121, 103 samples
     # max(x.shape[0] for x, _ in itertools.chain(dataset_train, dataset_test_original)) == 528
+    print(f'Train samples: {len(dataset_train)}\nValidation samples {len(dataset_val)}\nTest samples: {len(dataset_test)}\n')
 
     train_evaluate_rnn(dataset_train, dataset_val, dataset_test)
     train_evaluate_transformer(dataset_train, dataset_val, dataset_test)
-    
+
     
 if __name__ == '__main__':
     main()
