@@ -1,11 +1,9 @@
 from typing import Optional, Union, Tuple
-from pathlib import Path
 import random
 
 import numpy as np
-import rasterio
 import torch
-from torch.utils.data import Dataset, DataLoader, random_split
+from torch.utils.data import Dataset, random_split
 import torchvision.transforms.functional as TF
 
 

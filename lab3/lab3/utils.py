@@ -5,10 +5,9 @@ from typing import Dict, List
 from pathlib import Path
 import csv
 import json
-from functools import partial
 
 from .datasets import PatchDatasetPostPad, CroppedDataset
-from .models import LightningClassifier, UNetClassifier, CNNClassifier
+from .models import UNetClassifier, CNNClassifier
 
 import numpy as np
 import rasterio
