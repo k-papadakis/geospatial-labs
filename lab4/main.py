@@ -303,8 +303,9 @@ class LightningClassifier(pl.LightningModule):
 
     def predict_step(self, batch, batch_idx):
         logits, _ = self.get_logits_and_target(batch)
-        pred = torch.argmax(logits, dim=1)
-        return pred
+        preds = torch.argmax(logits, dim=1)
+        probs = F.softmax(logits, dim=1)
+        return preds, probs
 
 
 class GRUClassifier(LightningClassifier):
@@ -537,7 +538,8 @@ def train_evaluate_lit_classifier(
         y_true = torch.cat([batch[-1] for batch in loader_test]).view(
             -1
         )  # Assuming that target == batch[-1]
-        y_pred = torch.cat(trainer.predict(best_model, loader_test)).view(-1)
+        y_pred, _ = zip(*trainer.predict(best_model, loader_test))
+        y_pred = torch.cat(y_pred).view(-1)
 
         if ignore_index is not None:
             keep_mask = y_true != ignore_index

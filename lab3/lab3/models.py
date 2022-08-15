@@ -64,8 +64,9 @@ class LightningClassifier(pl.LightningModule):
 
     def predict_step(self, batch, batch_idx):
         logits, _ = self.get_logits_and_target(batch)
-        pred = torch.argmax(logits, dim=1)
-        return pred
+        preds = torch.argmax(logits, dim=1)
+        probs = F.softmax(logits, dim=1)
+        return preds, probs
 
 
 class MLPClassifier(LightningClassifier):

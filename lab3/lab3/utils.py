@@ -211,7 +211,8 @@ def train_evaluate_lit_classifier(
         y_true = torch.cat([batch[-1] for batch in loader_test]).view(
             -1
         )  # Assuming that target == batch[-1]
-        y_pred = torch.cat(trainer.predict(best_model, loader_test)).view(-1)
+        y_pred, _ = zip(*trainer.predict(best_model, loader_test))
+        y_pred = torch.cat(y_pred).view(-1)
 
         if ignore_index is not None:
             keep_mask = y_true != ignore_index
@@ -381,7 +382,9 @@ def predict_image_cnn(
     patch_size=15,
     accelerator='cpu'
 ) -> None:
-    """Predict an image with a CNNClassifier and save it to disk in a .png and .tif formats"""
+    """Predict an image with a CNNClassifier
+    and save it to disk in .tif format.
+    """
     # Load from disk
     image = load_image(src_path)
     dataset = PatchDatasetPostPad(image, None, patch_size=patch_size)
@@ -391,8 +394,7 @@ def predict_image_cnn(
     trainer = pl.Trainer(
         accelerator=accelerator, logger=False, enable_checkpointing=False
     )
-    new_var = trainer.predict(model, loader)
-    preds = new_var
+    preds, _ = zip(*trainer.predict(model, loader))
     preds = torch.cat(preds)
     preds = preds.reshape(dataset.image.shape[-2:])
 
@@ -414,28 +416,36 @@ def predict_image_unet(
     dst_path,
     model: UNetClassifier,
     batch_size=8,
-    size=64,
-    accelerator='cpu'
+    crop_size=64,
+    stride=8,
+    accelerator='cpu',
 ) -> None:
-    """Predict an image with a UNetClassifier, and save it to disk in a .png and .tif formats"""
+    """Predict an image with a UNetClassifier, using soft voting,
+    and save it to disk in .tif format.
+    """
     # Load from disk
     image = load_image(src_path)
-    dataset = CroppedDataset(image, None, size, size, use_padding=True)
+    dataset = CroppedDataset(image, None, crop_size, stride, use_padding=True)
     loader = DataLoader(dataset, batch_size=batch_size)
     height = dataset.image.shape[-2]
     width = dataset.image.shape[-1]
-    pred_image = np.full((1, height, width), -1, dtype=np.int64)
+
+    num_classes = model.hparams.num_classes
+    pred_image = np.full((1, num_classes, height, width), 0., dtype=np.float32)
 
     # Predict
     trainer = pl.Trainer(
         accelerator=accelerator, logger=False, enable_checkpointing=False
     )
-    preds = trainer.predict(model, loader)
-    preds = torch.cat(preds)
+    _, probs = zip(*trainer.predict(model, loader))
+    probs = torch.cat(probs)
+    probs = probs.numpy()
 
     for idx in range(len(dataset)):
         min_i, min_j, max_i, max_j = dataset.get_bounds(idx)
-        pred_image[0, min_i:max_i, min_j:max_j] = preds[idx]
+        pred_image[0, :, min_i:max_i, min_j:max_j] += probs[idx]
+
+    pred_image = np.argmax(pred_image, 1)
 
     p = dataset.padding
     s = (
