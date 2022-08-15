@@ -58,6 +58,7 @@ dependencies:
   - decorator=5.1.1=pyhd8ed1ab_0
   - defusedxml=0.7.1=pyhd8ed1ab_0
   - entrypoints=0.4=pyhd8ed1ab_0
+  - et_xmlfile=1.0.1=py_1001
   - executing=0.9.1=pyhd8ed1ab_0
   - expat=2.4.8=h27087fc_0
   - ffmpeg=4.3=hf484d3e_0
@@ -240,6 +241,7 @@ dependencies:
   - oauthlib=3.2.0=pyhd8ed1ab_0
   - openh264=2.1.1=h780b84a_0
   - openjpeg=2.4.0=hb52868f_1
+  - openpyxl=3.0.9=pyhd8ed1ab_0
   - openssl=1.1.1q=h166bdaf_0
   - packaging=21.3=pyhd8ed1ab_0
   - pandas=1.4.3=py310h769672d_0
@@ -330,6 +332,7 @@ dependencies:
   - sqlite=3.39.2=h4ff8645_0
   - stack_data=0.3.0=pyhd8ed1ab_0
   - statsmodels=0.13.2=py310hde88566_0
+  - tabulate=0.8.10=pyhd8ed1ab_0
   - tbb=2021.5.0=h924138e_1
   - tensorboard=2.10.0=pyhd8ed1ab_0
   - tensorboard-data-server=0.6.0=py310h597c629_2
@@ -388,7 +391,11 @@ dependencies:
   - zstd=1.5.2=h8a70e8d_3
   - pip:
     - build==0.8.0
+    - kaggle==1.5.12
     - pep517==0.13.0
+    - python-slugify==6.1.2
+    - text-unidecode==1.3
     - tomli==2.0.1
     - torch-tb-profiler==0.4.0
+    - yapf==0.32.0
 prefix: /home/konstantinos/miniconda3/envs/geospatial

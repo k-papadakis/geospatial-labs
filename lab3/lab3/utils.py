@@ -22,7 +22,7 @@ from torch.utils.data import DataLoader
 import pytorch_lightning as pl
 from pytorch_lightning.callbacks import ModelCheckpoint
 
-# ____________________________________________________INPUT/OUTPUT____________________________________________________
+# _________________________________INPUT/OUTPUT_________________________________
 
 
 def load_image(src_path) -> np.ndarray:
@@ -67,7 +67,7 @@ def read_info(path) -> Dict[str, List]:
     return info
 
 
-# ___________________________________________________MODEL TRAINING___________________________________________________
+# ________________________________MODEL TRAINING________________________________ 
 
 
 def create_dataloaders(
@@ -229,7 +229,7 @@ def train_evaluate_lit_classifier(
         )
 
 
-# ______________________________________________________PLOTTING______________________________________________________
+# ___________________________________PLOTTING___________________________________
 
 
 def display_image_and_label(
@@ -371,7 +371,7 @@ def test_cropped_dataset(src_path, use_padding, size, stride, skip_rate, rgb):
     dst_path.unlink()  # clean up
 
 
-# __________________________________________________IMAGE PREDICTION__________________________________________________
+# _______________________________IMAGE PREDICTION_______________________________
 
 
 def predict_image_cnn(
