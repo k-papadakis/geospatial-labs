@@ -95,7 +95,7 @@ def evaluate_predictions(
     output_dir.mkdir(parents=True, exist_ok=True)
     
     if verbose:
-        classification_report(y_true, y_pred, target_names=class_names, output_dict=False)
+        print(classification_report(y_true, y_pred, target_names=class_names, output_dict=False))
     report = classification_report(y_true, y_pred, target_names=class_names, output_dict=True)
     with open(output_dir/'classification_report.json', 'w') as f:
         json.dump(report, f, indent=4)
