@@ -270,7 +270,7 @@ class AugmentedDataset(Dataset):
             x, *y = self.transform(x, *y)
         else:
             x = self.transform(x)
-        return x, *y
+        return (x, *y)
     
 
 def flip_and_rotate(*tensors):
@@ -330,60 +330,3 @@ def split_dataset(dataset, train_size, test_size=0., seed=None):
     dataset_train, dataset_val, dataset_test = random_split(
         dataset, [n_train, n_val, n_test], generator)
     return dataset_train, dataset_val, dataset_test
-
-
-def test_cropped_dataset(
-    src_path='HyRANK_satellite/TrainingSet/Dioni.tif',
-    use_padding=True,
-    size=64,
-    stride=52,
-    rgb=(23, 11, 7),
-):
-    import matplotlib.pyplot as plt
-    from .utils import load_image
-    
-    # Load from disk
-    src_path = Path(src_path)
-    dst_path = Path(f'{src_path.stem}_reconstructed.tif')
-    with rasterio.open(src_path) as src:
-        image = src.read()
-            
-    dataset = CroppedDataset(
-        image, None, size, stride, use_padding=use_padding
-    )
-    loader = DataLoader(dataset)
-    
-    # Write to disk
-    with rasterio.open(
-        dst_path, 'w',
-        height=dataset.image.shape[-2],
-        width=dataset.image.shape[-1],
-        count=dataset.image.shape[0],
-        dtype=dataset.image.dtype,
-        driver='Gtiff',
-    ) as dst:
-        for idx, x in enumerate(loader):
-            if idx % 2 == 0:
-                continue
-            min_i, min_j, max_i, max_j = dataset.get_bounds(idx)
-            window = rasterio.windows.Window.from_slices(
-                (min_i, max_i), (min_j, max_j)
-            )
-            dst.write(x[0], window=window)
-            
-    fig, axs = plt.subplots(nrows=2, figsize=(16, 9))
-    
-    image = dataset.image[rgb, ...].transpose(1, 2, 0)
-    image = image / image.max()
-    axs[0].imshow(image)
-    axs[0].set_axis_off()
-    del image
-    
-    recon = load_image(dst_path)
-    recon = recon[rgb, ...].transpose(1, 2, 0)
-    recon = recon / recon.max()
-    axs[1].imshow(recon)
-    axs[1].set_axis_off()
-    
-    fig.tight_layout()
-    plt.show()

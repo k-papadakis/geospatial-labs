@@ -177,31 +177,44 @@ def display_image_and_label(
     return axs
 
 
-def display_patch(dataset, idx, rgb, ax=None):
-    if ax is None:
-        fig, ax = plt.subplots()
-    max_val = dataset.image.max()
-    patch, label = dataset[idx]
-    img = patch[rgb, ...]
-    img = np.transpose(img, (1, 2, 0))
-    img = img / max_val
-    ax.imshow(img)
-    ax.set_axis_off()
-    return ax
+def display_patch(dataset, idx, rgb, n_repeats=1, axs=None):
+    
+    def get_patch():
+        patch, _ = dataset[idx]
+        img = patch[rgb, ...] 
+        img = np.transpose(img, (1, 2, 0))
+        img = img / 0.35
+        return img
+    
+    if axs is None:
+        fig, axs = plt.subplots(nrows=n_repeats, figsize=(2, n_repeats))
+    
+    if n_repeats == 1:
+        axs.imshow(get_patch())
+        axs.set_axis_off()
+    else:    
+        for ax in axs:   
+            ax.imshow(get_patch())
+            ax.set_axis_off()
+        
+    return axs
 
 
-def display_segmentation(dataset, idx, cmap, norm, names, rgb, n_repeats=1, axs=None):
+def display_segmentation(dataset, idx, cmap, norm, class_names, rgb, n_repeats=1, axs=None):
     """Plot an item of an Augmented CroppedDataset multiple times"""
+    
+    def get_crop():
+        img, label = dataset[idx]
+        img = img[rgb, ...]
+        img = np.transpose(img, (1, 2, 0))
+        img = img / 0.35
+        return img, label
+        
     if axs is None:
         fig, axgrid = plt.subplots(nrows=n_repeats, ncols=2, figsize= (4, n_repeats))
         
-    max_val = dataset.image.max()
-    
     for ax1, ax2 in axgrid:
-        img, label = dataset[idx]
-        img = img[rgb, ...]
-        img = img / max_val
-        img = np.transpose(img, (1, 2, 0))
+        img, label = get_crop()
         ax1.imshow(img)
         ax2.imshow(label, cmap=cmap, norm=norm)
         ax1.set_axis_off()
@@ -212,10 +225,56 @@ def display_segmentation(dataset, idx, cmap, norm, names, rgb, n_repeats=1, axs=
         ax=axgrid, shrink=0.9, location='right'
     )
     cbar.set_ticks(np.arange(cmap.N) - 0.5)
-    cbar.set_ticklabels(names)
+    cbar.set_ticklabels(class_names)
     
     return axgrid
 
+
+def test_cropped_dataset(src_path, use_padding, size, stride, skip_rate, rgb):
+    import matplotlib.pyplot as plt
+    from .utils import load_image
+    
+    # Load from disk
+    src_path = Path(src_path)
+    dst_path = Path('.') / f'{src_path.stem}_reconstructed.tif'
+    with rasterio.open(src_path) as src:
+        image = src.read()
+            
+    dataset = CroppedDataset(image, None, size, stride, use_padding=use_padding)
+    loader = DataLoader(dataset)
+    
+    # Write to disk
+    with rasterio.open(
+        dst_path, 'w',
+        height=dataset.image.shape[-2],
+        width=dataset.image.shape[-1],
+        count=dataset.image.shape[0],
+        dtype=dataset.image.dtype,
+        driver='Gtiff',
+    ) as dst:
+        for idx, x in enumerate(loader):
+            if idx % skip_rate == 0:
+                continue
+            min_i, min_j, max_i, max_j = dataset.get_bounds(idx)
+            window = rasterio.windows.Window.from_slices((min_i, max_i), (min_j, max_j))
+            dst.write(x[0][0], window=window)
+            
+    fig, axs = plt.subplots(nrows=2, figsize=(16, 9))
+    
+    image = dataset.image[rgb, ...].transpose(1, 2, 0)
+    image = image / image.max()
+    axs[0].imshow(image)
+    axs[0].set_axis_off()
+    del image
+    
+    recon = load_image(dst_path)
+    recon = recon[rgb, ...].transpose(1, 2, 0)
+    recon = recon / recon.max()
+    axs[1].imshow(recon)
+    axs[1].set_axis_off()
+    
+    fig.tight_layout()
+    dst_path.unlink()  # clean up
 
 # __________________________________________________IMAGE PREDICTION__________________________________________________
 
@@ -306,7 +365,7 @@ def predict_all_images(
             rgb=rgb, title=src_path.stem + suffix
         )
         
-        plt.savefig(png_dst_path)
+        plt.savefig(png_dst_path, facecolor='white', bbox_inches='tight')
       
         
 def get_latest_checkpoint(output_dir) -> Path:
