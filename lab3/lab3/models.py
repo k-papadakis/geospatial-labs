@@ -5,14 +5,56 @@ from torch import nn
 import torch.nn.functional as F
 from torchvision.models import resnet18
 import pytorch_lightning as pl
-import torchmetrics
+from torchmetrics import Accuracy
 
 
-class LitMLP(pl.LightningModule):
-    """Simple 4-layer MLP with Dropout and L2 normalization"""
-    
-    def __init__(self, dim_in, dim_out, lr=1e-3, weight_decay=0, p_dropout=0.2):
+class LightningClassifier(pl.LightningModule):
+    """Basic template for a classifier"""
+    def __init__(self, num_classes, ignore_index=None, mdmc_average=None):
         super().__init__()
+        self.num_classes = num_classes
+        self.cross_entropy = nn.CrossEntropyLoss(ignore_index=ignore_index if ignore_index is not None else -100)
+        self.train_accuracy = Accuracy(num_classes=num_classes, ignore_index=ignore_index, mdmc_average=mdmc_average)
+        self.val_accuracy = Accuracy(num_classes=num_classes, ignore_index=ignore_index, mdmc_average=mdmc_average)
+        self.test_accuracy = Accuracy(num_classes=num_classes, ignore_index=ignore_index, mdmc_average=mdmc_average)
+        
+    def get_logits_and_target(self, batch):
+        x, *y= batch  # using * in case there is no target
+        y = y[0] if y else None
+        logits = self(x)
+        return logits, y
+    
+    def training_step(self, batch, batch_idx, optimizer_idx=None):
+        logits, y = self.get_logits_and_target(batch)
+        loss = self.cross_entropy(logits, y)
+        self.train_accuracy(logits, y)
+        self.log_dict({'loss/train': loss, 'accuracy/train': self.train_accuracy})
+        return loss
+    
+    def validation_step(self, batch, batch_idx):
+        logits, y = self.get_logits_and_target(batch)
+        loss = self.cross_entropy(logits, y)
+        self.val_accuracy(logits, y)
+        self.log_dict({'loss/val': loss, 'accuracy/val': self.val_accuracy})
+        
+    def test_step(self, batch, batch_idx):
+        logits, y = self.get_logits_and_target(batch)
+        loss = self.cross_entropy(logits, y)
+        self.test_accuracy(logits, y)
+        self.log_dict({'loss/test': loss, 'accuracy/test': self.test_accuracy})
+        
+    def predict_step(self, batch, batch_idx):
+        logits, _ = self.get_logits_and_target(batch)
+        pred = torch.argmax(logits, dim=1)
+        return pred
+
+
+class MLPClassifier(LightningClassifier):
+    """Simple 4-layer MLP with Dropout and L2 normalization"""
+    def __init__(self, dim_in, num_classes, lr=1e-3, weight_decay=0, p_dropout=0.2):
+        super().__init__(num_classes)
+        self.save_hyperparameters()
+        
         self.model = nn.Sequential(
             nn.Linear(dim_in, 128),
             nn.Dropout(p_dropout),
@@ -20,68 +62,45 @@ class LitMLP(pl.LightningModule):
             nn.Linear(128, 128),
             nn.Dropout(p_dropout),
             nn.ReLU(),
-            nn.Linear(128, dim_out),
+            nn.Linear(128, num_classes),
         )
         self.lr = lr
         self.weight_decay = weight_decay
         
-        self.train_accuracy = torchmetrics.Accuracy()
-        self.val_accuracy = torchmetrics.Accuracy()
-        self.test_accuracy = torchmetrics.Accuracy()
-        
-        self.test_confusion_matrix = torchmetrics.ConfusionMatrix(dim_out)
-        
-        self.save_hyperparameters()
-        
     def forward(self, x):
         return self.model(x)
     
-    def predict_step(self, batch, batch_idx):
-        x, y = batch
-        logits = self(x)
-        pred = torch.argmax(logits, 1)
-        return pred 
-    
-    def training_step(self, batch,  batch_idx):
-        x, y = batch
-        logits = self(x)
-        
-        loss = F.cross_entropy(logits, y)
-        self.log('loss/train', loss, on_epoch=True, on_step=False)
-        
-        self.train_accuracy(logits, y)
-        self.log('accuracy/train', self.train_accuracy, on_epoch=True, on_step=False)
-         
-        return loss
-    
-    def validation_step(self, batch,  batch_idx):
-        x, y = batch
-        logits = self(x)
-        
-        loss = F.cross_entropy(logits, y)
-        self.log('loss/val', loss, on_epoch=True, on_step=False)
-        
-        self.val_accuracy(logits, y)
-        self.log('accuracy/val', self.val_accuracy, on_epoch=True, on_step=False)
-        
-    def test_step(self, batch,  batch_idx):
-        x, y = batch
-        logits = self(x)
-        self.test_accuracy(logits, y)
-        self.test_confusion_matrix(logits, y)
-        
     def configure_optimizers(self):
         optimizer = torch.optim.Adam(self.parameters(), lr=self.lr, weight_decay=self.weight_decay)
         return optimizer
     
 
-class LitCNN(pl.LightningModule):
+# CNN Construction
+class CNNBlock(nn.Module):
+    
+    def __init__(self, channels, kernel_size=3, stride=1, padding='same'):
+        super().__init__()
+        self.model = nn.Sequential(
+            nn.Conv2d(channels, channels, kernel_size, stride, padding),
+            nn.BatchNorm2d(channels),
+            nn.ReLU(),
+            nn.Conv2d(channels, channels, kernel_size, stride, padding),
+            nn.BatchNorm2d(channels),
+            nn.ReLU(),
+        )
+        
+    def forward(self, x):
+        return self.model(x)
+
+class CNNClassifier(LightningClassifier):
     """Deep CNN with skip connections between convolutions that are two steps away
     Expects a 15 by 15 image.
     """
     
-    def __init__(self, channels_in, n_classes, lr=1e-3):
-        super().__init__()
+    def __init__(self, channels_in, num_classes, lr=1e-3):
+        super().__init__(num_classes)
+        self.save_hyperparameters()
+        self.lr = lr
 
         self.stem = nn.Sequential(
             nn.Conv2d(channels_in, 32, kernel_size=3, stride=1, padding='same'),
@@ -91,47 +110,16 @@ class LitCNN(pl.LightningModule):
             nn.BatchNorm2d(64),
             nn.ReLU(),
         )
-        self.block1 = nn.Sequential(
-            nn.Conv2d(64, 64, kernel_size=3, stride=1, padding='same'),
-            nn.BatchNorm2d(64),
-            nn.ReLU(),
-            nn.Conv2d(64, 64, kernel_size=3, stride=1, padding='same'),
-            nn.BatchNorm2d(64),
-            nn.ReLU(),
-        )
-        self.block2 = nn.Sequential(
-            nn.Conv2d(64, 64, kernel_size=3, stride=1, padding='same'),
-            nn.BatchNorm2d(64),
-            nn.ReLU(),
-            nn.Conv2d(64, 64, kernel_size=3, stride=1, padding='same'),
-            nn.BatchNorm2d(64),
-            nn.ReLU()
-        )
-        self.block3 = nn.Sequential(
-            nn.Conv2d(64, 64, kernel_size=3, stride=1, padding='same'),
-            nn.BatchNorm2d(64),
-            nn.ReLU(),
-            nn.Conv2d(64, 64, kernel_size=3, stride=1, padding='same'),
-            nn.BatchNorm2d(64),
-            nn.ReLU(),
-        )
+        self.block1 = CNNBlock(64)
+        self.block2 = CNNBlock(64)
+        self.block3 = CNNBlock(64)
 
         self.classifier = nn.Sequential(
             nn.Flatten(),
             nn.Linear(3*3*64, 128),
             nn.ReLU(),
-            nn.Linear(128, n_classes),
+            nn.Linear(128, num_classes),
         )
-        
-        self.lr = lr
-        
-        self.train_accuracy = torchmetrics.Accuracy()
-        self.val_accuracy = torchmetrics.Accuracy()
-        self.test_accuracy = torchmetrics.Accuracy()
-        
-        self.test_confusion_matrix = torchmetrics.ConfusionMatrix(n_classes)
-        
-        self.save_hyperparameters()
 
     def forward(self, x):
         x = self.stem(x)
@@ -142,40 +130,6 @@ class LitCNN(pl.LightningModule):
         x = x + self.block3(x)
         x = self.classifier(x)
         return x
-    
-    def predict_step(self, batch, batch_idx):
-        x = batch
-        logits = self(x)
-        pred = torch.argmax(logits, -1)
-        return pred
-
-    def training_step(self, batch, batch_idx):
-        x, y = batch
-        logits = self(x)
-        
-        loss = F.cross_entropy(logits, y)
-        self.log('loss/train', loss, on_epoch=True, on_step=False)
-
-        self.train_accuracy(logits, y)
-        self.log('accuracy/train', self.train_accuracy, on_epoch=True, on_step=False)
-
-        return loss
-    
-    def validation_step(self, batch, batch_idx):
-        x, y = batch
-        logits = self(x)
-        
-        loss = F.cross_entropy(logits, y)
-        self.log('loss/val', loss, on_epoch=True, on_step=False)
-        
-        self.val_accuracy(logits, y)
-        self.log('accuracy/val', self.val_accuracy, on_epoch=True, on_step=False)
-        
-    def test_step(self, batch,  batch_idx):
-        x, y = batch
-        logits = self(x)
-        self.test_accuracy(logits, y)
-        self.test_confusion_matrix(logits, y)
 
     def configure_optimizers(self):
         optimizer = torch.optim.Adam(self.parameters(), lr=self.lr)
@@ -232,12 +186,12 @@ class UpBlock(nn.Module):
         return self.conv(x_cat)
     
 
-class UNet(nn.Module):
-    
-    def __init__(self, n_channels, n_classes):
-        super().__init__()
-        self.n_channels = n_channels
-        self.n_classes = n_classes
+class UNetClassifier(LightningClassifier):
+    """Simple UNet implementation of depth 4"""
+    def __init__(self, n_channels, num_classes, ignore_index=None, lr=1e-4):
+        super().__init__(num_classes, ignore_index=ignore_index, mdmc_average='global')
+        self.save_hyperparameters()
+        self.lr = lr
         
         self.entrance = ConvBlock(n_channels, 64)
         self.down1 = DownBlock(64, 128)
@@ -248,8 +202,8 @@ class UNet(nn.Module):
         self.up2 = UpBlock(512, 256)
         self.up3 = UpBlock(256, 128)
         self.up4 = UpBlock(128, 64)
-        self.exit = nn.Conv2d(64, n_classes, 1)
-        
+        self.exit = nn.Conv2d(64, num_classes, 1)
+    
     def forward(self, x):
         a1 = self.entrance(x)
         a2 = self.down1(a1)
@@ -263,83 +217,17 @@ class UNet(nn.Module):
         logits = self.exit(b4)
         return logits
     
-
-class LitUNet(pl.LightningModule):
-    
-    def __init__(self, n_channels, n_classes, ignore_index=-1, lr=1e-4):
-        super().__init__()
-        self.unet = UNet(n_channels, n_classes)
-        self.lr = lr
-        self.ignore_index = ignore_index
-        
-        self.cross_entropy = nn.CrossEntropyLoss(ignore_index=ignore_index)
-        
-        self.train_accuracy = torchmetrics.Accuracy(ignore_index=ignore_index, mdmc_average='global')
-        self.val_accuracy = torchmetrics.Accuracy(ignore_index=ignore_index, mdmc_average='global')
-        self.test_accuracy = torchmetrics.Accuracy(ignore_index=ignore_index, mdmc_average='global')
-        
-        self.test_confusion_matrix = torchmetrics.ConfusionMatrix(n_classes)
-        
-        self.save_hyperparameters()
-    
-    def forward(self, x):
-        return self.unet(x)
-    
-    def predict_step(self, batch, batch_idx):
-        x, y = batch
-        logits = self(x)
-        pred = torch.argmax(logits, 1)
-        return pred
-    
-    def training_step(self, batch, batch_idx):
-        x, y = batch
-        logits = self(x)
-        
-        loss = self.cross_entropy(logits, y)
-        self.log('loss/train', loss, on_epoch=True, on_step=False)
-        
-        if not torch.all(y == self.ignore_index):  # avoid torchmetrics bug
-            self.train_accuracy(logits, y)
-            self.log('accuracy/train', self.train_accuracy, on_epoch=True, on_step=False)
-        
-        return loss
-    
-    def validation_step(self, batch, batch_idx):
-        x, y = batch
-        logits = self(x)
-        
-        loss = self.cross_entropy(logits, y)
-        self.log('loss/val', loss, on_epoch=True, on_step=False)
-        
-        if not torch.all(y == self.ignore_index):  # avoid torchmetrics bug
-            self.val_accuracy(logits, y)
-            self.log('accuracy/val', self.val_accuracy, on_epoch=True, on_step=False)
-        
     def configure_optimizers(self):
         optimizer = torch.optim.Adam(self.parameters(), lr=self.lr)
         return optimizer
     
-    def test_step(self, batch, batch_idx):
-        x, y = batch
-        if not torch.all(y == self.ignore_index):  # avoid torchmetrics bug
-            logits = self(x)
-        
-            # loss = self.cross_entropy(logits, y)
-            self.test_accuracy(logits, y)
-            self.test_confusion_matrix(*self.filter_ignore_index(logits, y))
-        
-    def filter_ignore_index(self, logits, y):
-        mask = y != self.ignore_index
-        logits = torch.transpose(logits, 1, 0)[:, mask].T
-        y = y[mask]
-        return logits, y
-        
 
-class LitTransferResNet(pl.LightningModule):
+class TransferResNetClassifier(LightningClassifier):
     """ResNet with the last layer replaced so that its output matches n_classes"""
     
-    def __init__(self, n_classes, freeze_head=False, lr=1e-3):
-        super().__init__()
+    def __init__(self, num_classes, freeze_head=False, lr=1e-3):
+        super().__init__(num_classes)
+        self.save_hyperparameters()
         
         self.model = resnet18(pretrained=True)
         self.freeze_head = freeze_head
@@ -347,55 +235,13 @@ class LitTransferResNet(pl.LightningModule):
             for param in self.model.parameters():
                 param.requires_grad = False
                 
-        self.model.fc = nn.Linear(512, n_classes)
+        self.model.fc = nn.Linear(512, num_classes)
 
         self.lr = lr
 
-        self.train_accuracy = torchmetrics.Accuracy()
-        self.val_accuracy = torchmetrics.Accuracy()
-        self.test_accuracy = torchmetrics.Accuracy()
-        
-        self.test_confusion_matrix = torchmetrics.ConfusionMatrix(n_classes)
-        
-        self.save_hyperparameters()
-
     def forward(self, x):
         return self.model(x)
-    
-    def predict_step(self, batch, batch_idx):
-        x, y = batch
-        logits = self(x)
-        pred = torch.argmax(logits, -1)
-        return pred 
-    
-    def training_step(self, batch,  batch_idx, optimizer_idx=None):
-        x, y = batch
-        logits = self(x)
-        
-        loss = F.cross_entropy(logits, y)
-        self.log('loss/train', loss, on_epoch=True, on_step=False)
-        
-        self.train_accuracy(logits, y)
-        self.log('accuracy/train', self.train_accuracy, on_epoch=True, on_step=False)
-        
-        return loss
-    
-    def validation_step(self, batch,  batch_idx):
-        x, y = batch
-        logits = self(x)
-        
-        loss = F.cross_entropy(logits, y)
-        self.log('loss/val', loss, on_epoch=True, on_step=False)
-        
-        self.val_accuracy(logits, y)
-        self.log('accuracy/val', self.val_accuracy, on_epoch=True, on_step=False)
-        
-    def test_step(self, batch,  batch_idx):
-        x, y = batch
-        logits = self(x)
-        self.test_accuracy(logits, y)
-        self.test_confusion_matrix(logits, y)
-
+            
     def configure_optimizers(self):
         children = list(self.model.children())
         

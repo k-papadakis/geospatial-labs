@@ -22,7 +22,7 @@ from pytorch_lightning.callbacks import EarlyStopping, ModelCheckpoint
 from torchmetrics import Accuracy
 
 
-# _________________________________ DATASETS _________________________________
+# _____________________________________________________ DATASETS _____________________________________________________
 
 class Ucf101(Dataset):
     
@@ -203,8 +203,6 @@ def train_val_split(dataset_train_original, n_groups_val, seed=None):
     dataset_train = Subset(dataset_train_original, train_indices)
     dataset_val = Subset(dataset_train_original, val_indices)
     
-    dataset_train.class_names = dataset_val.class_names = dataset_train_original.class_names
-    
     return dataset_train, dataset_val
 
 
@@ -232,39 +230,39 @@ def transformer_collate_fn(batch):
     return src, src_key_padding_mask, y
 
 
-# __________________________________ MODELS __________________________________
+# ______________________________________________________ MODELS ______________________________________________________
 
 class LightningClassifier(pl.LightningModule):
     
-    def __init__(self, num_classes):
+    def __init__(self, num_classes, ignore_index=None, mdmc_average=None):
         super().__init__()
         self.num_classes = num_classes
-        self.train_accuracy = Accuracy(num_classes=num_classes)
-        self.val_accuracy = Accuracy(num_classes=num_classes)
-        self.test_accuracy = Accuracy(num_classes=num_classes)
-    
+        self.cross_entropy = nn.CrossEntropyLoss(ignore_index=ignore_index if ignore_index is not None else -100)
+        self.train_accuracy = Accuracy(num_classes=num_classes, ignore_index=ignore_index, mdmc_average=mdmc_average)
+        self.val_accuracy = Accuracy(num_classes=num_classes, ignore_index=ignore_index, mdmc_average=mdmc_average)
+        self.test_accuracy = Accuracy(num_classes=num_classes, ignore_index=ignore_index, mdmc_average=mdmc_average)
+        
     def get_logits_and_target(self, batch):
-        raise NotImplementedError(
-            f'LightningClassifier [{type(self).__name__}] is missing'
-            'the required \"get_logits_and_target\" function'
-        )
+        x, y= batch
+        logits = self(x)
+        return logits, y
     
-    def training_step(self, batch, batch_idx):
+    def training_step(self, batch, batch_idx, optimizer_idx=None):
         logits, y = self.get_logits_and_target(batch)
-        loss = F.cross_entropy(logits, y)
+        loss = self.cross_entropy(logits, y)
         self.train_accuracy(logits, y)
         self.log_dict({'loss/train': loss, 'accuracy/train': self.train_accuracy})
         return loss
     
     def validation_step(self, batch, batch_idx):
         logits, y = self.get_logits_and_target(batch)
-        loss = F.cross_entropy(logits, y)
+        loss = self.cross_entropy(logits, y)
         self.val_accuracy(logits, y)
         self.log_dict({'loss/val': loss, 'accuracy/val': self.val_accuracy})
         
     def test_step(self, batch, batch_idx):
         logits, y = self.get_logits_and_target(batch)
-        loss = F.cross_entropy(logits, y)
+        loss = self.cross_entropy(logits, y)
         self.test_accuracy(logits, y)
         self.log_dict({'loss/test': loss, 'accuracy/test': self.test_accuracy})
         
@@ -304,11 +302,6 @@ class GRUClassifier(LightningClassifier):
     def configure_optimizers(self):
         optimizer = torch.optim.Adam(self.parameters(), lr=self.lr)
         return optimizer
-    
-    def get_logits_and_target(self, batch):
-        x, y = batch
-        logits = self(x)
-        return logits, y
     
 
 class PositionalEncoder(nn.Module):
@@ -371,125 +364,85 @@ class TransformerClassifier(LightningClassifier):
         return logits, y
 
 
-# _________________________________ TRAINING _________________________________
+# _____________________________________________________ TRAINING _____________________________________________________
 
-def train_evaluate(trainer, model, loader_train, loader_val, loader_test, class_names, output_dir):
+def create_dataloaders(dataset_train, dataset_val, dataset_test, batch_size, collate_fn=None, num_workers=0):
+    loader_train = DataLoader(
+        dataset_train, shuffle=True, collate_fn=collate_fn,
+        batch_size=batch_size, num_workers=num_workers,
+    ) if dataset_train is not None else None
     
+    loader_val = DataLoader(
+        dataset_val, shuffle=False, collate_fn=collate_fn,
+        batch_size=batch_size, num_workers=num_workers,
+    ) if dataset_val is not None else None
+    
+    loader_test = DataLoader(
+        dataset_test, shuffle=False, collate_fn=collate_fn,
+        batch_size=batch_size, num_workers=num_workers,
+    ) if dataset_test is not None else None
+    
+    return loader_train, loader_val, loader_test
+
+
+def evaluate_predictions(
+    output_dir, y_true, y_pred, class_names=None, verbose=True, title=None, figsize=(9, 9)
+) -> None:
+    """Compute and save a classification report and a confusion matrix"""
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     
+    if verbose:
+        classification_report(y_true, y_pred, target_names=class_names, output_dict=False)
+    report = classification_report(y_true, y_pred, target_names=class_names, output_dict=True)
+    with open(output_dir/'classification_report.json', 'w') as f:
+        json.dump(report, f, indent=4)
+    
+    fig, ax = plt.subplots(figsize=figsize)
+    ConfusionMatrixDisplay.from_predictions(y_true, y_pred, display_labels=class_names, xticks_rotation=90, ax=ax)
+    ax.set_title(title)
+    fig.savefig(output_dir/'confusion_matrix.png', facecolor='white', bbox_inches='tight')
+
+
+def train_evaluate_lit_classifier(
+    model, dataset_train, dataset_val, dataset_test, *, max_epochs, batch_size, 
+    class_names, output_dir, ignore_index=None, callbacks=None,
+    collate_fn=None, num_workers=2, accelerator='cpu', 
+) -> None:
+    """Train a LightningClassifier and save a classification report and a confusion matrix"""
+    if callbacks is None:
+        monitor = 'loss/val' if dataset_val is not None else None
+        callbacks = [ModelCheckpoint(monitor=monitor, mode='min')]
+    assert any(isinstance(cb, ModelCheckpoint) for cb in callbacks)
+        
+    loader_train, loader_val, loader_test = create_dataloaders(
+        dataset_train, dataset_val, dataset_test, batch_size=batch_size, num_workers=num_workers, collate_fn=collate_fn
+    )
+    
+    trainer = pl.Trainer(
+        max_epochs=max_epochs, accelerator=accelerator, callbacks=callbacks, default_root_dir=output_dir
+    )
     trainer.fit(model, train_dataloaders=loader_train, val_dataloaders=loader_val)
     
-    best_model = trainer.model.load_from_checkpoint(trainer.checkpoint_callback.best_model_path)
-    trainer.test(best_model, loader_test)
+    if dataset_test is not None:
+        best_model = trainer.model.load_from_checkpoint(trainer.checkpoint_callback.best_model_path)
+        trainer.test(best_model, loader_test)
 
-    y_true = torch.cat([batch[-1] for batch in loader_test])  # Assuming that target == batch[-1] 
-    y_pred = torch.cat(trainer.predict(best_model, loader_test))
+        y_true = torch.cat([batch[-1] for batch in loader_test]).view(-1)  # Assuming that target == batch[-1]
+        y_pred = torch.cat(trainer.predict(best_model, loader_test)).view(-1)
+        
+        if ignore_index is not None:
+            keep_mask = y_true != ignore_index
+            y_true = y_true[keep_mask]
+            y_pred = y_pred[keep_mask]
 
-    d = classification_report(y_true, y_pred, target_names=class_names, output_dict=True)
-    with open(output_dir/'classification_report.json', 'w') as f:
-        json.dump(d, f, indent=4)
-    
-    fig, ax = plt.subplots()
-    ConfusionMatrixDisplay.from_predictions(
-        y_true, y_pred, display_labels=class_names, xticks_rotation=90, ax=ax
-    )
-    ax.set_title(best_model.__class__.__name__)
-    fig.savefig(output_dir/'confusion_matrix.png', facecolor='white', bbox_inches='tight')
-    
-    
-def train_evaluate_rnn(
-    dataset_train, dataset_val, dataset_test,
-    max_epochs=300, patience=50, lr=1e-3, output_dir='output/rnn'
-):
-    loader_train_rnn = DataLoader(
-        dataset_train, shuffle=True, collate_fn=rnn_collate_fn,
-        batch_size=32, num_workers=2,
-    )
-    loader_val_rnn = DataLoader(
-        dataset_val, shuffle=False, collate_fn=rnn_collate_fn,
-        batch_size=32, num_workers=2,
-    )
-    loader_test_rnn = DataLoader(
-        dataset_test, shuffle=False, collate_fn=rnn_collate_fn,
-        batch_size=32, num_workers=2,
-    )
-
-    rnn = GRUClassifier(
-        input_size=512,
-        rnn_size=512,
-        num_classes=5,
-        num_rnn_layers=2,
-        lr=lr,
-    )
-    callbacks = [
-        EarlyStopping(monitor='loss/val', mode='min', patience=patience),
-        ModelCheckpoint(monitor='loss/val', mode='min', save_last=True)
-    ]
-    trainer = pl.Trainer(
-        accelerator='gpu' if torch.cuda.is_available() else 'cpu',
-        min_epochs=1,
-        max_epochs=max_epochs,
-        callbacks=callbacks,
-        log_every_n_steps=10,
-        default_root_dir=output_dir,
-    )
-    
-    train_evaluate(
-        trainer=trainer, model=rnn, loader_train=loader_train_rnn, loader_val=loader_val_rnn,
-        loader_test=loader_test_rnn, class_names=dataset_train.class_names, output_dir=output_dir,
-    )
+        title = best_model.__class__.__name__
+        evaluate_predictions(output_dir=output_dir, y_true=y_true, y_pred=y_pred, title=title, class_names=class_names)
 
 
-def train_evaluate_transformer(
-    dataset_train, dataset_val, dataset_test,
-    max_epochs=300, patience=50, lr=1e-3, output_dir='output/transformer'
-):
-    loader_train_transformer = DataLoader(
-        dataset_train, shuffle=True, collate_fn=transformer_collate_fn,
-        batch_size=32, num_workers=2,
-    )
-    loader_val_transformer = DataLoader(
-        dataset_val, shuffle=False, collate_fn=transformer_collate_fn,
-        batch_size=32, num_workers=2,
-    )
-    loader_test_transformer = DataLoader(
-        dataset_test, shuffle=False, collate_fn=transformer_collate_fn,
-        batch_size=32, num_workers=2,
-    )
-
-    transformer = TransformerClassifier(
-        d_model=512,
-        nhead=8,
-        dim_feedforward=2048,
-        num_layers=2,
-        num_classes=5,
-        lr=lr,
-    )
-    
-    callbacks = [
-        EarlyStopping(monitor='loss/val', mode='min', patience=patience),
-        ModelCheckpoint(monitor='loss/val', mode='min', save_last=True)
-    ]
-    trainer = pl.Trainer(
-        accelerator='gpu' if torch.cuda.is_available() else 'cpu',
-        min_epochs=1,
-        max_epochs=max_epochs,
-        callbacks=callbacks,
-        log_every_n_steps=10,
-        default_root_dir=output_dir,
-    )
-    
-    train_evaluate(
-        trainer=trainer, model=transformer, loader_train=loader_train_transformer, loader_val=loader_val_transformer,
-        loader_test=loader_test_transformer, class_names=dataset_train.class_names, output_dir=output_dir,
-    )
-    
-    
 def main():
     pl.utilities.seed.seed_everything(42)
     data_root_dir = 'data'
-    
     cache_all(data_root_dir)
     transform = None  # Hack to save some memory. Requires cache_all(root_dir),
 
@@ -497,17 +450,39 @@ def main():
         root_dir=data_root_dir, training=True, transform=transform,
         cache_fetched=True, cache_exist_ok=True,
     )  # 594 samples
-    dataset_train, dataset_val = train_val_split(dataset_train_original, 3)  # ~ (15/18, 3/18) * 594 = (495, 99) samples
+    dataset_train, dataset_val = train_val_split(dataset_train_original, 3)  # ~(15/18, 3/18) * 594 = (495, 99) samples
     dataset_test = Ucf101(
         root_dir=data_root_dir, training=False, transform=transform,
         cache_fetched=True, cache_exist_ok=True,
     )  # 224 samples
     # max(x.shape[0] for x, _ in itertools.chain(dataset_train, dataset_test_original)) == 528
-    print(f'Train samples: {len(dataset_train)}\nValidation samples {len(dataset_val)}\nTest samples: {len(dataset_test)}\n')
+    print(f'Train samples: {len(dataset_train)}')
+    print(f'Validation samples {len(dataset_val)}')
+    print(f'Test samples: {len(dataset_test)}\n')
 
-    train_evaluate_rnn(dataset_train, dataset_val, dataset_test)
-    train_evaluate_transformer(dataset_train, dataset_val, dataset_test)
-
+    class_names = dataset_train_original.class_names
+    accelerator = 'gpu' if torch.cuda.is_available() else 'cpu'
+    # RNN
+    train_evaluate_lit_classifier(
+        GRUClassifier(input_size=512, rnn_size=512, num_classes=5, num_rnn_layers=2, lr=1e-3),
+        dataset_train, dataset_val, dataset_test, class_names=class_names, collate_fn=rnn_collate_fn,
+        max_epochs=300, batch_size=32, output_dir='output/rnn', accelerator=accelerator, 
+        callbacks=[
+            EarlyStopping(monitor='loss/val', mode='min', patience=50),
+            ModelCheckpoint(monitor='loss/val', mode='min'),
+        ]
+    )
+    # Transformer
+    train_evaluate_lit_classifier(
+        TransformerClassifier(d_model=512, nhead=8, dim_feedforward=2048, num_layers=2, num_classes=5, lr=1e-3),
+        dataset_train, dataset_val, dataset_test, class_names=class_names, collate_fn=transformer_collate_fn,
+        max_epochs=300, batch_size=32, output_dir='output/transformer', accelerator=accelerator,
+        callbacks=[
+            EarlyStopping(monitor='loss/val', mode='min', patience=50),
+            ModelCheckpoint(monitor='loss/val', mode='min'),
+        ]
+    )
+    
     
 if __name__ == '__main__':
     main()

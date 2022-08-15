@@ -53,7 +53,7 @@ class PatchDatasetNoPad(Dataset):
             y = torch.tensor(y, dtype=torch.int64)
             return x, y
         else:
-            return x
+            return x,
 
 
 class PatchDatasetPrePad(Dataset):
@@ -96,7 +96,7 @@ class PatchDatasetPrePad(Dataset):
             y = torch.tensor(y, dtype=torch.int64)
             return x, y
         else:
-            return x
+            return x,
 
 
 class PatchDatasetPostPad(Dataset):
@@ -153,11 +153,13 @@ class PatchDatasetPostPad(Dataset):
             y = torch.tensor(y, dtype=torch.int64)
             return x, y
         else:
-            return x
+            return x,
         
         
 class CroppedDataset(Dataset):
+    
     """Sliding window over an image and its label"""
+    
     
     def __init__(
         self, image, label_image,
@@ -166,6 +168,7 @@ class CroppedDataset(Dataset):
         channels: Optional[Tuple[int, ...]] = None,
         use_padding: Optional[bool] = False,
     ):
+        
         super().__init__()
         
         self.image = image
@@ -188,7 +191,9 @@ class CroppedDataset(Dataset):
             raise ValueError('Invalid stride.')
         
         if use_padding:
-            _, _, max_i, max_j = self.get_bounds(len(self) - 1)  # exclusive
+            # Pad the image equally on all sides,
+            # so that the sliding window can cover the entire image
+            _, _, max_i, max_j = self.get_bounds(len(self) - 1)
             missed_h, missed_w = self.img_h - max_i, self.img_w - max_j
             dh = max(0, self.stride_h - missed_h)
             dw = max(0, self.stride_w - missed_w)
@@ -222,9 +227,10 @@ class CroppedDataset(Dataset):
             y = torch.tensor(y, dtype=torch.int64)
             return x, y
         else:
-            return x
+            return x,
 
     def get_bounds(self, idx):
+        # Get the box coordinates of the current position of the sliding window
         r, c = divmod(idx, self.n_cols)
         min_i, min_j = r * self.stride_h, c * self.stride_w
         max_i, max_j = min_i + self.crop_h, min_j + self.crop_w
@@ -259,12 +265,12 @@ class AugmentedDataset(Dataset):
         return len(self.dataset)
     
     def __getitem__(self, idx):
-        x, y = self.dataset[idx]
+        x, *y = self.dataset[idx]  # using * in case there's no target
         if self.apply_on_target:
-            x, y = self.transform(x, y)
+            x, *y = self.transform(x, *y)
         else:
             x = self.transform(x)
-        return x, y
+        return x, *y
     
 
 def flip_and_rotate(*tensors):

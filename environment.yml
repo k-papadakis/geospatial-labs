@@ -386,4 +386,9 @@ dependencies:
   - zipp=3.8.1=pyhd8ed1ab_0
   - zlib=1.2.12=h166bdaf_2
   - zstd=1.5.2=h8a70e8d_3
+  - pip:
+    - build==0.8.0
+    - pep517==0.13.0
+    - tomli==2.0.1
+    - torch-tb-profiler==0.4.0
 prefix: /home/konstantinos/miniconda3/envs/geospatial
