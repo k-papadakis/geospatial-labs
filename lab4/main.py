@@ -21,14 +21,18 @@ import pytorch_lightning as pl
 from pytorch_lightning.callbacks import EarlyStopping, ModelCheckpoint
 from torchmetrics import Accuracy
 
-
 # _____________________________________________________ DATASETS _____________________________________________________
 
+
 class Ucf101(Dataset):
-    
     def __init__(
-        self, root_dir, training: bool, transform=None,
-        cache_fetched=False, cache_exist_ok=False, cuda=False,
+        self,
+        root_dir,
+        training: bool,
+        transform=None,
+        cache_fetched=False,
+        cache_exist_ok=False,
+        cuda=False,
     ):
         # If isinstance(transform, nn.Module) and cuda=True,
         #  then multiprocessing will fail (e.g. DataLoader).
@@ -41,36 +45,41 @@ class Ucf101(Dataset):
         self.mode = 'train' if self.training else 'test'
         self.transform = transform
         self.cache_fetched = cache_fetched
-        
+
         # Create a directory to cache fetched videos, if appropriate
         if self.cache_fetched:
             self.cache_dir = self.root_dir / f'{self.__class__.__name__}_cache'
-            (self.cache_dir / self.mode).mkdir(parents=True, exist_ok=cache_exist_ok)
+            (self.cache_dir /
+             self.mode).mkdir(parents=True, exist_ok=cache_exist_ok)
         else:
             self.cache_dir = None
-        
+
         # Load the video filenames, and their respective labels
-        csv_path = self.root_dir/ f'{self.mode}.csv'
-        csv_ = np.genfromtxt(csv_path, delimiter=',', names=True, dtype=None, encoding=None)
+        csv_path = self.root_dir / f'{self.mode}.csv'
+        csv_ = np.genfromtxt(
+            csv_path, delimiter=',', names=True, dtype=None, encoding=None
+        )
         self.filenames = csv_['video_name']
         self.class_names, ys = np.unique(csv_['tag'], return_inverse=True)
         self.ys = torch.as_tensor(ys)
-        
+
         # Move the transform to gpu, if it is a Module.
         if isinstance(self.transform, nn.Module):
             self.device = torch.device('cuda:0' if cuda else 'cpu')
             self.transform.to(self.device)
         else:
             self.device = None
-            
+
     def __getitem__(self, idx):
         file_name = Path(self.filenames[idx])
         y = self.ys[idx]
-        
+
         file_path = self.root_dir / self.mode / file_name
-        
+
         if self.cache_fetched:
-            cache_path = self.cache_dir / self.mode / file_name.with_suffix('.npy')
+            cache_path = self.cache_dir / self.mode / file_name.with_suffix(
+                '.npy'
+            )
             if cache_path.exists():
                 x = np.load(cache_path)
             else:
@@ -78,13 +87,13 @@ class Ucf101(Dataset):
                 np.save(cache_path, x)
         else:
             x = self.read_transform_video(file_path)
-        
+
         x = torch.as_tensor(x)
         return x, y
-    
+
     def __len__(self):
         return len(self.filenames)
-    
+
     def read_transform_video(self, file_path):
         x, *_ = read_video(str(file_path), output_format='TCHW', pts_unit='sec')
         if self.transform is not None:
@@ -95,7 +104,6 @@ class Ucf101(Dataset):
 
 
 class ResNet50ExtractorVideo(nn.Module):
-    
     def __init__(self):
         super().__init__()
         self.weights = ResNet18_Weights.IMAGENET1K_V1
@@ -103,7 +111,7 @@ class ResNet50ExtractorVideo(nn.Module):
         model = resnet18(weights=self.weights)
         self.extractor = create_feature_extractor(model, ['flatten'])
         self.extractor.eval()
-    
+
     @torch.inference_mode()
     def forward(self, vid):
         need_squeeze = False
@@ -120,19 +128,27 @@ class ResNet50ExtractorVideo(nn.Module):
         if need_squeeze:
             vid = vid.squeeze(dim=0)
         return vid
-    
-    
+
+
 def cache_all(source_root_dir):
     """Call this first to avoid errors in data loading"""
     cuda = torch.cuda.is_available()
     transform = ResNet50ExtractorVideo()
     dataset_train = Ucf101(
-        root_dir=source_root_dir, training=True, transform=transform,
-        cache_fetched=True, cache_exist_ok=True, cuda=cuda
+        root_dir=source_root_dir,
+        training=True,
+        transform=transform,
+        cache_fetched=True,
+        cache_exist_ok=True,
+        cuda=cuda
     )
     dataset_test = Ucf101(
-        root_dir=source_root_dir, training=False, transform=transform,
-        cache_fetched=True, cache_exist_ok=True, cuda=cuda
+        root_dir=source_root_dir,
+        training=False,
+        transform=transform,
+        cache_fetched=True,
+        cache_exist_ok=True,
+        cuda=cuda
     )
 
     for dataset in dataset_train, dataset_test:
@@ -144,10 +160,10 @@ def plot_transformed(video_path, nframes=10):
     vid, *_ = read_video(video_path, output_format='TCHW', pts_unit='sec')
     preprocessor = ResNet18_Weights.IMAGENET1K_V1.transforms()
     preprocessed = preprocessor(vid)
-    
+
     vid = np.transpose(vid, (0, 2, 3, 1))
     preprocessed = np.transpose(preprocessed, (0, 2, 3, 1))
-    
+
     fig, axs = plt.subplots(nrows=nframes, ncols=2, figsize=(8, 16))
     fig.set_tight_layout(True)
     for i in range(nframes):
@@ -179,20 +195,20 @@ def train_val_split(dataset_train_original, n_groups_val, seed=None):
     # Name: cut, dtype: int64
     # >>> df.groupby('label')['group'].agg(['min', 'max', 'nunique', 'count'])
     #               min  max  nunique  count
-    # label                                 
+    # label
     # CricketShot     8   25       18    118
     # PlayingCello    8   25       18    120
     # Punch           8   25       18    121
     # ShavingBeard    8   25       18    118
     # TennisSwing     8   25       18    117
-    
+
     if seed is not None:
         random.seed(seed)
     val_video_groups = set(random.sample(range(8, 26), n_groups_val))
     print(f'Making validation set from video groups {sorted(val_video_groups)}')
     p = re.compile(r'v_[a-zA-Z]*_g(\d+)_')
     train_indices, val_indices = [], []
-    
+
     for i, s in enumerate(dataset_train_original.filenames):
         video_group = int(p.match(s).group(1))
         if video_group in val_video_groups:
@@ -202,7 +218,7 @@ def train_val_split(dataset_train_original, n_groups_val, seed=None):
 
     dataset_train = Subset(dataset_train_original, train_indices)
     dataset_val = Subset(dataset_train_original, val_indices)
-    
+
     return dataset_train, dataset_val
 
 
@@ -215,72 +231,95 @@ def rnn_collate_fn(batch):
 
 def transformer_collate_fn(batch):
     seqs, y = map(list, zip(*batch))
-    
+
     src = pad_sequence(seqs, batch_first=True)
-    
+
     y = torch.stack(y)
-    
+
     lengths = list(map(len, seqs))
     N = len(lengths)
     T = max(lengths)
     src_key_padding_mask = torch.full((N, T), False, dtype=torch.bool)
     for i in range(N):
         src_key_padding_mask[i, lengths[i]:] = True
-    
+
     return src, src_key_padding_mask, y
 
 
 # ______________________________________________________ MODELS ______________________________________________________
 
+
 class LightningClassifier(pl.LightningModule):
-    
     def __init__(self, num_classes, ignore_index=None, mdmc_average=None):
         super().__init__()
         self.num_classes = num_classes
-        self.cross_entropy = nn.CrossEntropyLoss(ignore_index=ignore_index if ignore_index is not None else -100)
-        self.train_accuracy = Accuracy(num_classes=num_classes, ignore_index=ignore_index, mdmc_average=mdmc_average)
-        self.val_accuracy = Accuracy(num_classes=num_classes, ignore_index=ignore_index, mdmc_average=mdmc_average)
-        self.test_accuracy = Accuracy(num_classes=num_classes, ignore_index=ignore_index, mdmc_average=mdmc_average)
-        
+        self.cross_entropy = nn.CrossEntropyLoss(
+            ignore_index=ignore_index if ignore_index is not None else -100
+        )
+        self.train_accuracy = Accuracy(
+            num_classes=num_classes,
+            ignore_index=ignore_index,
+            mdmc_average=mdmc_average
+        )
+        self.val_accuracy = Accuracy(
+            num_classes=num_classes,
+            ignore_index=ignore_index,
+            mdmc_average=mdmc_average
+        )
+        self.test_accuracy = Accuracy(
+            num_classes=num_classes,
+            ignore_index=ignore_index,
+            mdmc_average=mdmc_average
+        )
+
     def get_logits_and_target(self, batch):
-        x, y= batch
+        x, y = batch
         logits = self(x)
         return logits, y
-    
+
     def training_step(self, batch, batch_idx, optimizer_idx=None):
         logits, y = self.get_logits_and_target(batch)
         loss = self.cross_entropy(logits, y)
         self.train_accuracy(logits, y)
-        self.log_dict({'loss/train': loss, 'accuracy/train': self.train_accuracy})
+        self.log_dict(
+            {
+                'loss/train': loss,
+                'accuracy/train': self.train_accuracy
+            }
+        )
         return loss
-    
+
     def validation_step(self, batch, batch_idx):
         logits, y = self.get_logits_and_target(batch)
         loss = self.cross_entropy(logits, y)
         self.val_accuracy(logits, y)
         self.log_dict({'loss/val': loss, 'accuracy/val': self.val_accuracy})
-        
+
     def test_step(self, batch, batch_idx):
         logits, y = self.get_logits_and_target(batch)
         loss = self.cross_entropy(logits, y)
         self.test_accuracy(logits, y)
         self.log_dict({'loss/test': loss, 'accuracy/test': self.test_accuracy})
-        
+
     def predict_step(self, batch, batch_idx):
         logits, _ = self.get_logits_and_target(batch)
         pred = torch.argmax(logits, dim=1)
         return pred
-    
-    
+
+
 class GRUClassifier(LightningClassifier):
-    
     def __init__(
-        self, input_size, rnn_size, num_classes, num_rnn_layers,
-        dropout=0.1, lr=1e-3,
+        self,
+        input_size,
+        rnn_size,
+        num_classes,
+        num_rnn_layers,
+        dropout=0.1,
+        lr=1e-3,
     ):
         super().__init__(num_classes)
         self.save_hyperparameters()
-        
+
         self.dropout = dropout
         self.gru = nn.GRU(
             input_size=input_size,
@@ -291,24 +330,23 @@ class GRUClassifier(LightningClassifier):
         )
         self.linear = nn.Linear(rnn_size, self.num_classes)
         self.lr = lr
-        
+
     def forward(self, x):
         x, _ = self.gru(x)
         x = x[:, -1, :]
         x = F.dropout(x, self.dropout)
         x = self.linear(x)
         return x
-    
+
     def configure_optimizers(self):
         optimizer = torch.optim.Adam(self.parameters(), lr=self.lr)
         return optimizer
-    
+
 
 class PositionalEncoder(nn.Module):
-    
     def __init__(self, d_model, max_len):
         super().__init__()
-        
+
         pos = torch.arange(max_len).unsqueeze(1)
         exponents = torch.arange(0, d_model, 2) / (-d_model)
         angle_rates = torch.pow(10_000.0, exponents)
@@ -316,48 +354,60 @@ class PositionalEncoder(nn.Module):
         encoding = torch.empty(1, max_len, d_model)
         encoding[0, :, 0::2] = torch.sin(angles)
         encoding[0, :, 1::2] = torch.cos(angles)
-        
+
         self.register_buffer('encoding', encoding)
-        
+
     def forward(self, x):
         x = x + self.encoding[:, :x.shape[1], :]
         return x
 
 
 class TransformerClassifier(LightningClassifier):
-    
     def __init__(
-        self, d_model, nhead, dim_feedforward, num_layers, num_classes,
-        dropout=0.1, max_len=1_000, lr=1e-3,
+        self,
+        d_model,
+        nhead,
+        dim_feedforward,
+        num_layers,
+        num_classes,
+        dropout=0.1,
+        max_len=1_000,
+        lr=1e-3,
     ):
         super().__init__(num_classes)
         self.save_hyperparameters()
-        
+
         self.dropout = dropout
         self.positional_encoder = PositionalEncoder(d_model, max_len=max_len)
         self.transformer_encoder = nn.TransformerEncoder(
             encoder_layer=nn.TransformerEncoderLayer(
-                d_model, nhead, dim_feedforward, dropout=dropout, batch_first=True
+                d_model,
+                nhead,
+                dim_feedforward,
+                dropout=dropout,
+                batch_first=True
             ),
             num_layers=num_layers,
         )
         self.linear = nn.Linear(d_model, self.num_classes)
         self.lr = lr
-        
+
     def forward(self, src, mask=None, src_key_padding_mask=None):
         # src.shape = B, T, D
         x = self.positional_encoder(src)
         x = F.dropout(x, p=self.dropout)
-        x = self.transformer_encoder(x, mask=mask, src_key_padding_mask=src_key_padding_mask) 
-        x = torch.amax(x, 1) # B, D
+        x = self.transformer_encoder(
+            x, mask=mask, src_key_padding_mask=src_key_padding_mask
+        )
+        x = torch.amax(x, 1)  # B, D
         x = F.dropout(x, p=self.dropout)
-        x = self.linear(x) # B, C
+        x = self.linear(x)  # B, C
         return x
-    
+
     def configure_optimizers(self):
         optimizer = torch.optim.Adam(self.parameters(), lr=self.lr)
         return optimizer
-    
+
     def get_logits_and_target(self, batch):
         x, src_key_padding_mask, y = batch
         logits = self(x, src_key_padding_mask=src_key_padding_mask)
@@ -366,78 +416,142 @@ class TransformerClassifier(LightningClassifier):
 
 # _____________________________________________________ TRAINING _____________________________________________________
 
-def create_dataloaders(dataset_train, dataset_val, dataset_test, batch_size, collate_fn=None, num_workers=0):
+
+def create_dataloaders(
+    dataset_train,
+    dataset_val,
+    dataset_test,
+    batch_size,
+    collate_fn=None,
+    num_workers=0
+):
     loader_train = DataLoader(
-        dataset_train, shuffle=True, collate_fn=collate_fn,
-        batch_size=batch_size, num_workers=num_workers,
+        dataset_train,
+        shuffle=True,
+        collate_fn=collate_fn,
+        batch_size=batch_size,
+        num_workers=num_workers,
     ) if dataset_train is not None else None
-    
+
     loader_val = DataLoader(
-        dataset_val, shuffle=False, collate_fn=collate_fn,
-        batch_size=batch_size, num_workers=num_workers,
+        dataset_val,
+        shuffle=False,
+        collate_fn=collate_fn,
+        batch_size=batch_size,
+        num_workers=num_workers,
     ) if dataset_val is not None else None
-    
+
     loader_test = DataLoader(
-        dataset_test, shuffle=False, collate_fn=collate_fn,
-        batch_size=batch_size, num_workers=num_workers,
+        dataset_test,
+        shuffle=False,
+        collate_fn=collate_fn,
+        batch_size=batch_size,
+        num_workers=num_workers,
     ) if dataset_test is not None else None
-    
+
     return loader_train, loader_val, loader_test
 
 
 def evaluate_predictions(
-    output_dir, y_true, y_pred, class_names=None, verbose=True, title=None, figsize=(9, 9)
+    output_dir,
+    y_true,
+    y_pred,
+    class_names=None,
+    verbose=True,
+    title=None,
+    figsize=(9, 9)
 ) -> None:
     """Compute and save a classification report and a confusion matrix"""
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
-    
+
     if verbose:
-        classification_report(y_true, y_pred, target_names=class_names, output_dict=False)
-    report = classification_report(y_true, y_pred, target_names=class_names, output_dict=True)
-    with open(output_dir/'classification_report.json', 'w') as f:
+        classification_report(
+            y_true, y_pred, target_names=class_names, output_dict=False
+        )
+    report = classification_report(
+        y_true, y_pred, target_names=class_names, output_dict=True
+    )
+    with open(output_dir / 'classification_report.json', 'w') as f:
         json.dump(report, f, indent=4)
-    
+
     fig, ax = plt.subplots(figsize=figsize)
-    ConfusionMatrixDisplay.from_predictions(y_true, y_pred, display_labels=class_names, xticks_rotation=90, ax=ax)
+    ConfusionMatrixDisplay.from_predictions(
+        y_true, y_pred, display_labels=class_names, xticks_rotation=90, ax=ax
+    )
     ax.set_title(title)
-    fig.savefig(output_dir/'confusion_matrix.png', facecolor='white', bbox_inches='tight')
+    fig.savefig(
+        output_dir / 'confusion_matrix.png',
+        facecolor='white',
+        bbox_inches='tight'
+    )
 
 
 def train_evaluate_lit_classifier(
-    model, dataset_train, dataset_val, dataset_test, *, max_epochs, batch_size, 
-    class_names, output_dir, ignore_index=None, callbacks=None,
-    collate_fn=None, num_workers=2, accelerator='cpu', 
+    model,
+    dataset_train,
+    dataset_val,
+    dataset_test,
+    *,
+    max_epochs,
+    batch_size,
+    class_names,
+    output_dir,
+    ignore_index=None,
+    callbacks=None,
+    collate_fn=None,
+    num_workers=2,
+    accelerator='cpu',
 ) -> None:
     """Train a LightningClassifier and save a classification report and a confusion matrix"""
     if callbacks is None:
         monitor = 'loss/val' if dataset_val is not None else None
         callbacks = [ModelCheckpoint(monitor=monitor, mode='min')]
     assert any(isinstance(cb, ModelCheckpoint) for cb in callbacks)
-        
+
     loader_train, loader_val, loader_test = create_dataloaders(
-        dataset_train, dataset_val, dataset_test, batch_size=batch_size, num_workers=num_workers, collate_fn=collate_fn
+        dataset_train,
+        dataset_val,
+        dataset_test,
+        batch_size=batch_size,
+        num_workers=num_workers,
+        collate_fn=collate_fn
     )
-    
+
     trainer = pl.Trainer(
-        max_epochs=max_epochs, accelerator=accelerator, callbacks=callbacks, default_root_dir=output_dir
+        max_epochs=max_epochs,
+        accelerator=accelerator,
+        callbacks=callbacks,
+        default_root_dir=output_dir
     )
-    trainer.fit(model, train_dataloaders=loader_train, val_dataloaders=loader_val)
-    
+    trainer.fit(
+        model, train_dataloaders=loader_train, val_dataloaders=loader_val
+    )
+
     if dataset_test is not None:
-        best_model = trainer.model.load_from_checkpoint(trainer.checkpoint_callback.best_model_path)
+        best_model = trainer.model.load_from_checkpoint(
+            trainer.checkpoint_callback.best_model_path
+        )
         trainer.test(best_model, loader_test)
 
-        y_true = torch.cat([batch[-1] for batch in loader_test]).view(-1)  # Assuming that target == batch[-1]
+        y_true = torch.cat([batch[-1] for batch in loader_test]).view(
+            -1
+        )  # Assuming that target == batch[-1]
         y_pred = torch.cat(trainer.predict(best_model, loader_test)).view(-1)
-        
+
         if ignore_index is not None:
             keep_mask = y_true != ignore_index
             y_true = y_true[keep_mask]
             y_pred = y_pred[keep_mask]
 
         title = best_model.__class__.__name__
-        evaluate_predictions(output_dir=output_dir, y_true=y_true, y_pred=y_pred, title=title, class_names=class_names)
+        evaluate_predictions(
+            output_dir=output_dir,
+            y_true=y_true,
+            y_pred=y_pred,
+            title=title,
+            class_names=class_names
+        )
 
 
 def main():
@@ -447,13 +561,21 @@ def main():
     transform = None  # Hack to save some memory. Requires cache_all(root_dir),
 
     dataset_train_original = Ucf101(
-        root_dir=data_root_dir, training=True, transform=transform,
-        cache_fetched=True, cache_exist_ok=True,
+        root_dir=data_root_dir,
+        training=True,
+        transform=transform,
+        cache_fetched=True,
+        cache_exist_ok=True,
     )  # 594 samples
-    dataset_train, dataset_val = train_val_split(dataset_train_original, 3)  # ~(15/18, 3/18) * 594 = (495, 99) samples
+    dataset_train, dataset_val = train_val_split(
+        dataset_train_original, 3
+    )  # ~(15/18, 3/18) * 594 = (495, 99) samples
     dataset_test = Ucf101(
-        root_dir=data_root_dir, training=False, transform=transform,
-        cache_fetched=True, cache_exist_ok=True,
+        root_dir=data_root_dir,
+        training=False,
+        transform=transform,
+        cache_fetched=True,
+        cache_exist_ok=True,
     )  # 224 samples
     # max(x.shape[0] for x, _ in itertools.chain(dataset_train, dataset_test_original)) == 528
     print(f'Train samples: {len(dataset_train)}')
@@ -464,9 +586,22 @@ def main():
     accelerator = 'gpu' if torch.cuda.is_available() else 'cpu'
     # RNN
     train_evaluate_lit_classifier(
-        GRUClassifier(input_size=512, rnn_size=512, num_classes=5, num_rnn_layers=2, lr=1e-3),
-        dataset_train, dataset_val, dataset_test, class_names=class_names, collate_fn=rnn_collate_fn,
-        max_epochs=300, batch_size=32, output_dir='output/rnn', accelerator=accelerator, 
+        GRUClassifier(
+            input_size=512,
+            rnn_size=512,
+            num_classes=5,
+            num_rnn_layers=2,
+            lr=1e-3
+        ),
+        dataset_train,
+        dataset_val,
+        dataset_test,
+        class_names=class_names,
+        collate_fn=rnn_collate_fn,
+        max_epochs=300,
+        batch_size=32,
+        output_dir='output/rnn',
+        accelerator=accelerator,
         callbacks=[
             EarlyStopping(monitor='loss/val', mode='min', patience=50),
             ModelCheckpoint(monitor='loss/val', mode='min'),
@@ -474,15 +609,29 @@ def main():
     )
     # Transformer
     train_evaluate_lit_classifier(
-        TransformerClassifier(d_model=512, nhead=8, dim_feedforward=2048, num_layers=2, num_classes=5, lr=1e-3),
-        dataset_train, dataset_val, dataset_test, class_names=class_names, collate_fn=transformer_collate_fn,
-        max_epochs=300, batch_size=32, output_dir='output/transformer', accelerator=accelerator,
+        TransformerClassifier(
+            d_model=512,
+            nhead=8,
+            dim_feedforward=2048,
+            num_layers=2,
+            num_classes=5,
+            lr=1e-3
+        ),
+        dataset_train,
+        dataset_val,
+        dataset_test,
+        class_names=class_names,
+        collate_fn=transformer_collate_fn,
+        max_epochs=300,
+        batch_size=32,
+        output_dir='output/transformer',
+        accelerator=accelerator,
         callbacks=[
             EarlyStopping(monitor='loss/val', mode='min', patience=50),
             ModelCheckpoint(monitor='loss/val', mode='min'),
         ]
     )
-    
-    
+
+
 if __name__ == '__main__':
     main()
