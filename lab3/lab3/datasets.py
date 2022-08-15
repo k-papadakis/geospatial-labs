@@ -14,40 +14,45 @@ class PatchDatasetNoPad(Dataset):
     No use of padding.
     Instead, ignore pixels whose patch doesn't lie inside the image.
     """
-    
     def __init__(
-        self, image, label_image, patch_size,
-        channels=None, ignore_index=-1,
+        self,
+        image,
+        label_image,
+        patch_size,
+        channels=None,
+        ignore_index=-1,
     ):
         super().__init__()
-        
+
         self.image = image
         self.channels = channels if channels is not None else slice(None)
         self.ignore_index = ignore_index
-            
-        # Keep only the pixels that are labelled and whose patch lies inside the image 
+
+        # Keep only the pixels that are labelled and whose patch lies inside the image
         r = patch_size // 2
         is_inner = np.full(image.shape[-2:], False, bool)
         is_inner[r:-r, r:-r] = True
         if label_image is not None:
-            self.indices = np.nonzero((label_image != self.ignore_index) & is_inner)
+            self.indices = np.nonzero(
+                (label_image != self.ignore_index) & is_inner
+            )
             self.labels = label_image[self.indices]
         else:
             self.indices = np.nonzero(is_inner)
             self.labels = None
-            
+
         self.patch_size = patch_size
-        
+
     def __len__(self):
         return len(self.indices[0])
-    
+
     def __getitem__(self, idx):
         i, j = self.indices[0][idx], self.indices[1][idx]
         r = self.patch_size // 2
-        x = self.image[self.channels, i-r : i+r+1, j-r : j+r+1]
-        
+        x = self.image[self.channels, i - r:i + r + 1, j - r:j + r + 1]
+
         x = torch.tensor(x, dtype=torch.float32)
-        
+
         if self.labels is not None:
             y = self.labels[idx]
             y = torch.tensor(y, dtype=torch.int64)
@@ -60,38 +65,41 @@ class PatchDatasetPrePad(Dataset):
     """Patches of specified size around the pixels whose label is non zero.
     Pads the entire image before slicing. Results in uneven padding
     """
-    
     def __init__(
-        self, image, label_image, patch_size,
-        channels=None, ignore_index=-1,
+        self,
+        image,
+        label_image,
+        patch_size,
+        channels=None,
+        ignore_index=-1,
     ):
         super().__init__()
-        
+
         self.channels = channels if channels is not None else slice(None)
         self.ignore_index = ignore_index
         self.patch_size = patch_size
         r = patch_size // 2
-        self.padded_image = np.pad(image, ((0,0), (r,r), (r,r)))
-        
+        self.padded_image = np.pad(image, ((0, 0), (r, r), (r, r)))
+
         if label_image is not None:
             # Keep only the pixels that are labelled
             self.indices = np.nonzero(label_image != self.ignore_index)
             self.labels = label_image[self.indices]
         else:
-           self.indices = tuple(map(np.ravel, np.indices(image.shape[-2:])))
-           self.labels = None
-        
+            self.indices = tuple(map(np.ravel, np.indices(image.shape[-2:])))
+            self.labels = None
+
     def __len__(self):
         return len(self.indices[0])
-    
+
     def __getitem__(self, idx):
         i, j = self.indices[0][idx], self.indices[1][idx]
         r = self.patch_size // 2
-        x = self.padded_image[self.channels, i : 1+i+2*r, j : 1+j+2*r]
-        
+        x = self.padded_image[self.channels, i:1 + i + 2 * r, j:1 + j + 2 * r]
+
         x = torch.tensor(x, dtype=torch.float32)
-        
-        if self.labels is not None:    
+
+        if self.labels is not None:
             y = self.labels[idx]
             y = torch.tensor(y, dtype=torch.int64)
             return x, y
@@ -103,77 +111,78 @@ class PatchDatasetPostPad(Dataset):
     """Patches of specified size around the pixels whose label is non zero.
     Slices a patch and then pads it equally on each side.
     """
-    
     def __init__(
-        self, image, label_image, patch_size,
-        channels=None, ignore_index=-1,
+        self,
+        image,
+        label_image,
+        patch_size,
+        channels=None,
+        ignore_index=-1,
     ):
         super().__init__()
-        
+
         self.channels = channels if channels is not None else slice(None)
         self.ignore_index = ignore_index
         self.patch_size = patch_size
         self.image = image
-        
+
         if label_image is not None:
             # Keep only the pixels that are labelled
             self.indices = np.nonzero(label_image != self.ignore_index)
             self.labels = label_image[self.indices]
         else:
-           self.indices = tuple(map(np.ravel, np.indices(image.shape[-2:])))
-           self.labels = None
-        
+            self.indices = tuple(map(np.ravel, np.indices(image.shape[-2:])))
+            self.labels = None
+
     def __len__(self):
         return len(self.indices[0])
-    
+
     def __getitem__(self, idx):
         i, j = self.indices[0][idx], self.indices[1][idx]
         r = self.patch_size // 2
-        
-        i_min = max(0, i-r)
-        i_max = min(i+r+1, self.image.shape[-2] - 1)
-        j_min = max(0, j-r)
-        j_max = min(j+r+1, self.image.shape[-1] - 1)
-        x = self.image[self.channels, i_min : i_max, j_min : j_max]
-        
+
+        i_min = max(0, i - r)
+        i_max = min(i + r + 1, self.image.shape[-2] - 1)
+        j_min = max(0, j - r)
+        j_max = min(j + r + 1, self.image.shape[-1] - 1)
+        x = self.image[self.channels, i_min:i_max, j_min:j_max]
+
         h, w = x.shape[-2:]
         h_pad = self.patch_size - h
         w_pad = self.patch_size - w
         padding = (
-            (0, 0),
-            (h_pad // 2, h_pad - h_pad//2),
-            (w_pad // 2, w_pad - w_pad//2)
+            (0, 0), (h_pad // 2, h_pad - h_pad // 2),
+            (w_pad // 2, w_pad - w_pad // 2)
         )
         x = np.pad(x, padding)
-        
+
         x = torch.tensor(x, dtype=torch.float32)
-        
-        if self.labels is not None:    
+
+        if self.labels is not None:
             y = self.labels[idx]
             y = torch.tensor(y, dtype=torch.int64)
             return x, y
         else:
             return x,
-        
-        
+
+
 class CroppedDataset(Dataset):
-    
     """Sliding window over an image and its label"""
-    
-    
     def __init__(
-        self, image, label_image,
+        self,
+        image,
+        label_image,
         crop_size: Union[int, Tuple[int, int]],
         stride: Union[int, Tuple[int, int]] = 1,
         channels: Optional[Tuple[int, ...]] = None,
         use_padding: Optional[bool] = False,
     ):
-        
+
         super().__init__()
-        
+
         self.image = image
         self.labels = label_image
-        
+
         if isinstance(crop_size, int):
             self.crop_h, self.crop_w = crop_size, crop_size
         elif isinstance(crop_size, tuple):
@@ -182,14 +191,14 @@ class CroppedDataset(Dataset):
             raise ValueError('Invalid crop_size.')
         if self.crop_h > self.img_h or self.crop_w > self.img_w:
             raise ValueError('crops_size is bigger than image size.')
-        
+
         if isinstance(stride, int):
             self.stride_h, self.stride_w = stride, stride
         elif isinstance(stride, tuple):
             self.stride_h, self.stride_w = stride
         else:
             raise ValueError('Invalid stride.')
-        
+
         if use_padding:
             # Pad the image equally on all sides,
             # so that the sliding window can cover the entire image
@@ -197,33 +206,32 @@ class CroppedDataset(Dataset):
             missed_h, missed_w = self.img_h - max_i, self.img_w - max_j
             dh = max(0, self.stride_h - missed_h)
             dw = max(0, self.stride_w - missed_w)
-            self.padding = (dh//2, dh - dh//2), (dw//2, dw - dw//2)
+            self.padding = (dh // 2, dh - dh // 2), (dw // 2, dw - dw // 2)
             self.image = np.pad(
-                self.image, ((0, 0),) + self.padding,
-                'constant', constant_values=0
+                self.image, ((0, 0), ) + self.padding,
+                'constant',
+                constant_values=0
             )
             if self.labels is not None:
                 self.labels = np.pad(
-                    self.labels, self.padding,
-                    'constant', constant_values=-1
+                    self.labels, self.padding, 'constant', constant_values=-1
                 )
         else:
             self.padding = None
-            
+
         self.channels = channels if channels is not None else slice(None)
-        
-        
+
     def __len__(self):
         return self.n_rows * self.n_cols
-    
+
     def __getitem__(self, idx):
         min_i, min_j, max_i, max_j = self.get_bounds(idx)
-        
-        x = self.image[self.channels, min_i : max_i, min_j : max_j]
+
+        x = self.image[self.channels, min_i:max_i, min_j:max_j]
         x = torch.tensor(x, dtype=torch.float32)
-        
+
         if self.labels is not None:
-            y = self.labels[min_i : max_i, min_j : max_j]
+            y = self.labels[min_i:max_i, min_j:max_j]
             y = torch.tensor(y, dtype=torch.int64)
             return x, y
         else:
@@ -246,24 +254,23 @@ class CroppedDataset(Dataset):
 
     @property
     def n_rows(self):
-        return 1 + (self.img_h - self.crop_h)//self.stride_h
+        return 1 + (self.img_h - self.crop_h) // self.stride_h
 
     @property
     def n_cols(self):
-        return 1 + (self.img_w - self.crop_w)//self.stride_w
+        return 1 + (self.img_w - self.crop_w) // self.stride_w
 
 
 class AugmentedDataset(Dataset):
     """"Wraps a dataset to include a transform"""
-    
     def __init__(self, dataset, transform, apply_on_target=False):
         self.dataset = dataset
         self.transform = transform
         self.apply_on_target = apply_on_target
-        
+
     def __len__(self):
         return len(self.dataset)
-    
+
     def __getitem__(self, idx):
         x, *y = self.dataset[idx]  # using * in case there's no target
         if self.apply_on_target:
@@ -271,11 +278,11 @@ class AugmentedDataset(Dataset):
         else:
             x = self.transform(x)
         return (x, *y)
-    
+
 
 def flip_and_rotate(*tensors):
     # Use this transform only when height == width!
-    
+
     tensors = list(tensors)
     # Expand 2 dimensional tensors so that the transforms work
     expanded = []
@@ -283,7 +290,7 @@ def flip_and_rotate(*tensors):
         if tensors[i].ndim == 2:
             tensors[i] = torch.unsqueeze(tensors[i], 0)
             expanded.append(i)
-    
+
     # Flip vertically
     if random.random() > 0.5:
         tensors = [TF.vflip(t) for t in tensors]
@@ -291,7 +298,7 @@ def flip_and_rotate(*tensors):
     k = random.randint(0, 4)
     if k != 0:
         tensors = [TF.rotate(t, k * 90) for t in tensors]
-    
+
     # Undo the expansion
     for idx in expanded:
         tensors[idx] = torch.squeeze(tensors[idx], 0)
@@ -328,5 +335,6 @@ def split_dataset(dataset, train_size, test_size=0., seed=None):
     if seed is not None:
         generator.manual_seed(seed)
     dataset_train, dataset_val, dataset_test = random_split(
-        dataset, [n_train, n_val, n_test], generator)
+        dataset, [n_train, n_val, n_test], generator
+    )
     return dataset_train, dataset_val, dataset_test
