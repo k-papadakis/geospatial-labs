@@ -1,17 +1,16 @@
+from lab3.utils import LightningClassifier, train_evaluate_lit_classifier
+
 from pathlib import Path
 import re
-import json
 
 import random
 import numpy as np
 import matplotlib.pyplot as plt
 
-from sklearn.metrics import ConfusionMatrixDisplay, classification_report
-
 import torch
 from torch import nn
 import torch.nn.functional as F
-from torch.utils.data import Dataset, DataLoader, Subset
+from torch.utils.data import Dataset, Subset
 from torch.nn.utils.rnn import pad_sequence
 from torchvision.io import read_video
 from torchvision.models import resnet18, ResNet18_Weights
@@ -19,12 +18,13 @@ from torchvision.models.feature_extraction import create_feature_extractor
 
 import pytorch_lightning as pl
 from pytorch_lightning.callbacks import EarlyStopping, ModelCheckpoint
-from torchmetrics import Accuracy
 
-# _____________________________________________________ DATASETS _____________________________________________________
+# __________________________________ DATASETS __________________________________
 
 
 class Ucf101(Dataset):
+    """The UCF101 dataset. Caching of the transform is supported."""
+
     def __init__(
         self,
         root_dir,
@@ -34,12 +34,13 @@ class Ucf101(Dataset):
         cache_exist_ok=False,
         cuda=False,
     ):
-        # If isinstance(transform, nn.Module) and cuda=True,
-        #  then multiprocessing will fail (e.g. DataLoader).
-        # Generally, avoid using a DataLoader if not everything is cached,
-        #  because workers might crash for unknown reasons.
-        # Instead, make a call to `cache_all` first,
-        #  and use the dataset with transform=None.
+        """If isinstance(transform, nn.Module) and cuda=True,
+        then multiprocessing will fail (e.g. when using a DataLoader).
+        Workers might crash even when cuda=False, for reasons unknown. Thus,
+        it is advised to avoid using a DataLoader if not everything is cached.
+        Instead, make a call to `cache_all` first.
+        """
+
         self.root_dir = Path(root_dir)
         self.training = training
         self.mode = 'train' if self.training else 'test'
@@ -103,7 +104,13 @@ class Ucf101(Dataset):
         return x
 
 
-class ResNet50ExtractorVideo(nn.Module):
+class ResNet18ExtractorVideo(nn.Module):
+    """On each video frame, apply the default transforms
+    of a Resnet18 that is pretrained on ImageNet,
+    and then apply the ResNet18 with its final layer removed.
+    The result is a sequence of 512-dimensional vectors.
+    """
+
     def __init__(self):
         super().__init__()
         self.weights = ResNet18_Weights.IMAGENET1K_V1
@@ -131,16 +138,19 @@ class ResNet50ExtractorVideo(nn.Module):
 
 
 def cache_all(source_root_dir):
-    """Call this first to avoid errors in data loading"""
+    """Iterate over the UCF01 dataset with the ResNet18ExtractorVideo transform,
+    so that the entire dataset gets cached.
+    Call this first to avoid errors in data loading.
+    """
     cuda = torch.cuda.is_available()
-    transform = ResNet50ExtractorVideo()
+    transform = ResNet18ExtractorVideo()
     dataset_train = Ucf101(
         root_dir=source_root_dir,
         training=True,
         transform=transform,
         cache_fetched=True,
         cache_exist_ok=True,
-        cuda=cuda
+        cuda=cuda,
     )
     dataset_test = Ucf101(
         root_dir=source_root_dir,
@@ -148,7 +158,7 @@ def cache_all(source_root_dir):
         transform=transform,
         cache_fetched=True,
         cache_exist_ok=True,
-        cuda=cuda
+        cuda=cuda,
     )
 
     for dataset in dataset_train, dataset_test:
@@ -180,27 +190,30 @@ def train_val_split(dataset_train_original, n_groups_val, seed=None):
     and every video group has roughly the same amount of videos, which are cuts of a single original video.
     A random selection of `n_groups_val` video groups of each class will comprise our validation set,
     and the remaining `18 - n_groups_val` video groups will comprise our validation set.
+    
+    More specific statistics about the dataset can be found below.
+    
+    >>> import pandas as pd
+    >>> video_names = pd.read_csv('data/train.csv')['video_name']
+    >>> pattern = r'v_(?P<label>[a-zA-Z]*)_g(?P<group>\d+)_c(?P<cut>\d+)'
+    >>> df = video_names.str.extract(pattern)
+    >>> df = df.astype({'group': int, 'cut': int})
+    >>> df = df.sort_values(by=['label', 'group', 'cut'])
+    >>> df.groupby(['label', 'group'])['cut'].count().value_counts()
+    7    64
+    6    19
+    5     4
+    4     3
+    Name: cut, dtype: int64
+    >>> df.groupby('label')['group'].agg(['min', 'max', 'nunique', 'count'])
+                  min  max  nunique  count
+    label
+    CricketShot     8   25       18    118
+    PlayingCello    8   25       18    120
+    Punch           8   25       18    121
+    ShavingBeard    8   25       18    118
+    TennisSwing     8   25       18    117
     """
-    # >>> import pandas as pd
-    # >>> video_names = pd.read_csv('data/train.csv')['video_name']
-    # >>> pattern = r'v_(?P<label>[a-zA-Z]*)_g(?P<group>\d+)_c(?P<cut>\d+)'
-    # >>> df = video_names.str.extract(pattern)
-    # >>> df = df.astype({'group': int, 'cut': int})
-    # >>> df = df.sort_values(by=['label', 'group', 'cut'])
-    # >>> df.groupby(['label', 'group'])['cut'].count().value_counts()
-    # 7    64
-    # 6    19
-    # 5     4
-    # 4     3
-    # Name: cut, dtype: int64
-    # >>> df.groupby('label')['group'].agg(['min', 'max', 'nunique', 'count'])
-    #               min  max  nunique  count
-    # label
-    # CricketShot     8   25       18    118
-    # PlayingCello    8   25       18    120
-    # Punch           8   25       18    121
-    # ShavingBeard    8   25       18    118
-    # TennisSwing     8   25       18    117
 
     if seed is not None:
         random.seed(seed)
@@ -246,69 +259,12 @@ def transformer_collate_fn(batch):
     return src, src_key_padding_mask, y
 
 
-# ______________________________________________________ MODELS ______________________________________________________
-
-
-class LightningClassifier(pl.LightningModule):
-    def __init__(self, num_classes, ignore_index=None, mdmc_average=None):
-        super().__init__()
-        self.num_classes = num_classes
-        self.cross_entropy = nn.CrossEntropyLoss(
-            ignore_index=ignore_index if ignore_index is not None else -100
-        )
-        self.train_accuracy = Accuracy(
-            num_classes=num_classes,
-            ignore_index=ignore_index,
-            mdmc_average=mdmc_average
-        )
-        self.val_accuracy = Accuracy(
-            num_classes=num_classes,
-            ignore_index=ignore_index,
-            mdmc_average=mdmc_average
-        )
-        self.test_accuracy = Accuracy(
-            num_classes=num_classes,
-            ignore_index=ignore_index,
-            mdmc_average=mdmc_average
-        )
-
-    def get_logits_and_target(self, batch):
-        x, y = batch
-        logits = self(x)
-        return logits, y
-
-    def training_step(self, batch, batch_idx, optimizer_idx=None):
-        logits, y = self.get_logits_and_target(batch)
-        loss = self.cross_entropy(logits, y)
-        self.train_accuracy(logits, y)
-        self.log_dict(
-            {
-                'loss/train': loss,
-                'accuracy/train': self.train_accuracy
-            }
-        )
-        return loss
-
-    def validation_step(self, batch, batch_idx):
-        logits, y = self.get_logits_and_target(batch)
-        loss = self.cross_entropy(logits, y)
-        self.val_accuracy(logits, y)
-        self.log_dict({'loss/val': loss, 'accuracy/val': self.val_accuracy})
-
-    def test_step(self, batch, batch_idx):
-        logits, y = self.get_logits_and_target(batch)
-        loss = self.cross_entropy(logits, y)
-        self.test_accuracy(logits, y)
-        self.log_dict({'loss/test': loss, 'accuracy/test': self.test_accuracy})
-
-    def predict_step(self, batch, batch_idx):
-        logits, _ = self.get_logits_and_target(batch)
-        preds = torch.argmax(logits, dim=1)
-        probs = F.softmax(logits, dim=1)
-        return preds, probs
+# ___________________________________ MODELS ___________________________________
 
 
 class GRUClassifier(LightningClassifier):
+    """A sequence to vector GRU with a final linear layer for classification"""
+
     def __init__(
         self,
         input_size,
@@ -345,6 +301,8 @@ class GRUClassifier(LightningClassifier):
 
 
 class PositionalEncoder(nn.Module):
+    """Positional encoding as implemented in "Attention is all you need"."""
+
     def __init__(self, d_model, max_len):
         super().__init__()
 
@@ -364,6 +322,9 @@ class PositionalEncoder(nn.Module):
 
 
 class TransformerClassifier(LightningClassifier):
+    """Transformer encoder with a maxpooling layer over the encoded outputs,
+    and a final linear layer for classification"""
+
     def __init__(
         self,
         d_model,
@@ -386,7 +347,7 @@ class TransformerClassifier(LightningClassifier):
                 nhead,
                 dim_feedforward,
                 dropout=dropout,
-                batch_first=True
+                batch_first=True,
             ),
             num_layers=num_layers,
         )
@@ -415,145 +376,7 @@ class TransformerClassifier(LightningClassifier):
         return logits, y
 
 
-# _____________________________________________________ TRAINING _____________________________________________________
-
-
-def create_dataloaders(
-    dataset_train,
-    dataset_val,
-    dataset_test,
-    batch_size,
-    collate_fn=None,
-    num_workers=0
-):
-    loader_train = DataLoader(
-        dataset_train,
-        shuffle=True,
-        collate_fn=collate_fn,
-        batch_size=batch_size,
-        num_workers=num_workers,
-    ) if dataset_train is not None else None
-
-    loader_val = DataLoader(
-        dataset_val,
-        shuffle=False,
-        collate_fn=collate_fn,
-        batch_size=batch_size,
-        num_workers=num_workers,
-    ) if dataset_val is not None else None
-
-    loader_test = DataLoader(
-        dataset_test,
-        shuffle=False,
-        collate_fn=collate_fn,
-        batch_size=batch_size,
-        num_workers=num_workers,
-    ) if dataset_test is not None else None
-
-    return loader_train, loader_val, loader_test
-
-
-def evaluate_predictions(
-    output_dir,
-    y_true,
-    y_pred,
-    class_names=None,
-    verbose=True,
-    title=None,
-    figsize=(9, 9)
-) -> None:
-    """Compute and save a classification report and a confusion matrix"""
-    output_dir = Path(output_dir)
-    output_dir.mkdir(parents=True, exist_ok=True)
-
-    if verbose:
-        classification_report(
-            y_true, y_pred, target_names=class_names, output_dict=False
-        )
-    report = classification_report(
-        y_true, y_pred, target_names=class_names, output_dict=True
-    )
-    with open(output_dir / 'classification_report.json', 'w') as f:
-        json.dump(report, f, indent=4)
-
-    fig, ax = plt.subplots(figsize=figsize)
-    ConfusionMatrixDisplay.from_predictions(
-        y_true, y_pred, display_labels=class_names, xticks_rotation=90, ax=ax
-    )
-    ax.set_title(title)
-    fig.savefig(
-        output_dir / 'confusion_matrix.png',
-        facecolor='white',
-        bbox_inches='tight'
-    )
-
-
-def train_evaluate_lit_classifier(
-    model,
-    dataset_train,
-    dataset_val,
-    dataset_test,
-    *,
-    max_epochs,
-    batch_size,
-    class_names,
-    output_dir,
-    ignore_index=None,
-    callbacks=None,
-    collate_fn=None,
-    num_workers=2,
-    accelerator='cpu',
-) -> None:
-    """Train a LightningClassifier and save a classification report and a confusion matrix"""
-    if callbacks is None:
-        monitor = 'loss/val' if dataset_val is not None else None
-        callbacks = [ModelCheckpoint(monitor=monitor, mode='min')]
-    assert any(isinstance(cb, ModelCheckpoint) for cb in callbacks)
-
-    loader_train, loader_val, loader_test = create_dataloaders(
-        dataset_train,
-        dataset_val,
-        dataset_test,
-        batch_size=batch_size,
-        num_workers=num_workers,
-        collate_fn=collate_fn
-    )
-
-    trainer = pl.Trainer(
-        max_epochs=max_epochs,
-        accelerator=accelerator,
-        callbacks=callbacks,
-        default_root_dir=output_dir
-    )
-    trainer.fit(
-        model, train_dataloaders=loader_train, val_dataloaders=loader_val
-    )
-
-    if dataset_test is not None:
-        best_model = trainer.model.load_from_checkpoint(
-            trainer.checkpoint_callback.best_model_path
-        )
-        trainer.test(best_model, loader_test)
-
-        y_true = torch.cat([batch[-1] for batch in loader_test]).view(
-            -1
-        )  # Assuming that target == batch[-1]
-        y_pred, _ = zip(*trainer.predict(best_model, loader_test))
-        y_pred = torch.cat(y_pred).view(-1)
-
-        if ignore_index is not None:
-            keep_mask = y_true != ignore_index
-            y_true = y_true[keep_mask]
-            y_pred = y_pred[keep_mask]
-
-        title = best_model.__class__.__name__
-        evaluate_predictions(
-            output_dir=output_dir,
-            y_true=y_true,
-            y_pred=y_pred,
-            title=title,
-            class_names=class_names
-        )
+# __________________________________ TRAINING __________________________________
 
 
 def main():
@@ -586,6 +409,7 @@ def main():
 
     class_names = dataset_train_original.class_names
     accelerator = 'gpu' if torch.cuda.is_available() else 'cpu'
+
     # RNN
     train_evaluate_lit_classifier(
         GRUClassifier(
@@ -593,7 +417,7 @@ def main():
             rnn_size=512,
             num_classes=5,
             num_rnn_layers=2,
-            lr=1e-3
+            lr=1e-3,
         ),
         dataset_train,
         dataset_val,
@@ -607,7 +431,7 @@ def main():
         callbacks=[
             EarlyStopping(monitor='loss/val', mode='min', patience=50),
             ModelCheckpoint(monitor='loss/val', mode='min'),
-        ]
+        ],
     )
     # Transformer
     train_evaluate_lit_classifier(
@@ -617,7 +441,7 @@ def main():
             dim_feedforward=2048,
             num_layers=2,
             num_classes=5,
-            lr=1e-3
+            lr=1e-3,
         ),
         dataset_train,
         dataset_val,
@@ -631,7 +455,7 @@ def main():
         callbacks=[
             EarlyStopping(monitor='loss/val', mode='min', patience=50),
             ModelCheckpoint(monitor='loss/val', mode='min'),
-        ]
+        ],
     )
 
 
