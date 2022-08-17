@@ -9,27 +9,29 @@ from torchmetrics import Accuracy
 
 
 class LightningClassifier(pl.LightningModule):
-    """Basic template for a classifier"""
+    """Basic template for a LightningModule classifier."""
+
     def __init__(self, num_classes, ignore_index=None, mdmc_average=None):
         super().__init__()
         self.num_classes = num_classes
         self.cross_entropy = nn.CrossEntropyLoss(
             ignore_index=ignore_index if ignore_index is not None else -100
         )
+        # TODO: When ignore_index is not None the results seem incorrect.
         self.train_accuracy = Accuracy(
             num_classes=num_classes,
             ignore_index=ignore_index,
-            mdmc_average=mdmc_average
+            mdmc_average=mdmc_average,
         )
         self.val_accuracy = Accuracy(
             num_classes=num_classes,
             ignore_index=ignore_index,
-            mdmc_average=mdmc_average
+            mdmc_average=mdmc_average,
         )
         self.test_accuracy = Accuracy(
             num_classes=num_classes,
             ignore_index=ignore_index,
-            mdmc_average=mdmc_average
+            mdmc_average=mdmc_average,
         )
 
     def get_logits_and_target(self, batch):
@@ -71,6 +73,7 @@ class LightningClassifier(pl.LightningModule):
 
 class MLPClassifier(LightningClassifier):
     """Simple 4-layer MLP with Dropout and L2 normalization"""
+
     def __init__(
         self, dim_in, num_classes, lr=1e-3, weight_decay=0, p_dropout=0.2
     ):
@@ -101,6 +104,7 @@ class MLPClassifier(LightningClassifier):
 
 # CNN Construction
 class CNNBlock(nn.Module):
+
     def __init__(self, channels, kernel_size=3, stride=1, padding='same'):
         super().__init__()
         self.model = nn.Sequential(
@@ -120,6 +124,7 @@ class CNNClassifier(LightningClassifier):
     """Deep CNN with skip connections between convolutions that are two steps away
     Expects a 15 by 15 image.
     """
+
     def __init__(self, channels_in, num_classes, lr=1e-3):
         super().__init__(num_classes)
         self.save_hyperparameters()
@@ -161,6 +166,7 @@ class CNNClassifier(LightningClassifier):
 
 # U-Net Construction
 class ConvBlock(nn.Module):
+
     def __init__(self, in_channels, out_channels, kernel_size=3):
         super().__init__()
         self.model = nn.Sequential(
@@ -169,14 +175,14 @@ class ConvBlock(nn.Module):
                 out_channels,
                 kernel_size,
                 padding='same',
-                bias=False
+                bias=False,
             ), nn.BatchNorm2d(out_channels), nn.ReLU(inplace=True),
             nn.Conv2d(
                 out_channels,
                 out_channels,
                 kernel_size,
                 padding='same',
-                bias=False
+                bias=False,
             ), nn.BatchNorm2d(out_channels), nn.ReLU(inplace=True)
         )
 
@@ -185,6 +191,7 @@ class ConvBlock(nn.Module):
 
 
 class DownBlock(nn.Module):
+
     def __init__(self, in_channels, out_channels):
         super().__init__()
         self.model = nn.Sequential(
@@ -196,6 +203,7 @@ class DownBlock(nn.Module):
 
 
 class UpBlock(nn.Module):
+
     def __init__(self, in_channels, out_channels):
         super().__init__()
         self.convt = nn.ConvTranspose2d(in_channels, out_channels, 2, 2)
@@ -216,6 +224,7 @@ class UpBlock(nn.Module):
 
 class UNetClassifier(LightningClassifier):
     """Simple UNet implementation of depth 4"""
+
     def __init__(self, n_channels, num_classes, ignore_index=None, lr=1e-4):
         super().__init__(
             num_classes, ignore_index=ignore_index, mdmc_average='global'
@@ -254,6 +263,7 @@ class UNetClassifier(LightningClassifier):
 
 class TransferResNetClassifier(LightningClassifier):
     """ResNet with the last layer replaced so that its output matches n_classes"""
+
     def __init__(self, num_classes, freeze_head=False, lr=1e-3):
         super().__init__(num_classes)
         self.save_hyperparameters()

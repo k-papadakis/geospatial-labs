@@ -50,7 +50,7 @@ def main():
     ]
     train_y_paths = [
         'HyRANK_satellite/TrainingSet/Dioni_GT.tif',
-        'HyRANK_satellite/TrainingSet/Loukia_GT.tif'
+        'HyRANK_satellite/TrainingSet/Loukia_GT.tif',
     ]
     validation_x_paths = [
         'HyRANK_satellite/ValidationSet/Erato.tif',
@@ -74,7 +74,7 @@ def main():
     train_evaluate_lit_classifier = partial(
         train_evaluate_lit_classifier,
         class_names=class_names[1:],
-        accelerator=accelerator
+        accelerator=accelerator,
     )
 
     # ---PLOT THE IMAGES---
@@ -159,7 +159,7 @@ def main():
     cropped_dataset_overlap_aug = AugmentedDataset(
         cropped_dataset_overlap,
         transform=flip_and_rotate,
-        apply_on_target=True
+        apply_on_target=True,
     )
 
     # ---TRAIN---
@@ -171,7 +171,7 @@ def main():
         x_pixels_test,
         y_pixels_train,
         y_pixels_test,
-        output_dir=output_dir / 'svm'
+        output_dir=output_dir / 'svm',
     )
     # Random Forest
     print('\nTraining Random Forest...')
@@ -181,7 +181,7 @@ def main():
         x_pixels_test,
         y_pixels_train,
         y_pixels_test,
-        output_dir=output_dir / 'randomforest'
+        output_dir=output_dir / 'randomforest',
     )
     # MLP
     print('\nTraining MLP...')
@@ -257,7 +257,7 @@ def main():
         class_names=class_names,
         rgb=rgb,
         accelerator=accelerator,
-        output_dir=output_dir / 'cnn_all' / 'predictions'
+        output_dir=output_dir / 'cnn_all' / 'predictions',
     )
 
     # UNet All
@@ -293,4 +293,3 @@ def main():
 
 if __name__ == '__main__':
     main()
-    

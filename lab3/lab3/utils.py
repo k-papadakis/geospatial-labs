@@ -1,5 +1,6 @@
+# %%
 import re
-from typing import List, Tuple
+from typing import List, Optional, Tuple
 from operator import itemgetter
 from typing import Dict, List
 from pathlib import Path
@@ -7,7 +8,7 @@ import csv
 import json
 
 from .datasets import PatchDatasetPostPad, CroppedDataset
-from .models import UNetClassifier, CNNClassifier
+from .models import LightningClassifier, UNetClassifier, CNNClassifier
 
 import numpy as np
 import rasterio
@@ -18,7 +19,7 @@ from sklearn.metrics import ConfusionMatrixDisplay, classification_report
 from sklearn.pipeline import Pipeline
 
 import torch
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, Dataset
 import pytorch_lightning as pl
 from pytorch_lightning.callbacks import ModelCheckpoint
 
@@ -67,13 +68,13 @@ def read_info(path) -> Dict[str, List]:
     return info
 
 
-# ________________________________MODEL TRAINING________________________________ 
+# ________________________________MODEL TRAINING________________________________
 
 
 def create_dataloaders(
-    dataset_train,
-    dataset_val,
-    dataset_test,
+    dataset_train: Optional[Dataset],
+    dataset_val: Optional[Dataset],
+    dataset_test: Optional[Dataset],
     batch_size,
     collate_fn=None,
     num_workers=0
@@ -112,7 +113,7 @@ def evaluate_predictions(
     class_names=None,
     verbose=True,
     title=None,
-    figsize=(9, 9)
+    figsize=(9, 9),
 ) -> None:
     """Compute and save a classification report and a confusion matrix"""
     output_dir = Path(output_dir)
@@ -138,7 +139,7 @@ def evaluate_predictions(
     fig.savefig(
         output_dir / 'confusion_matrix.png',
         facecolor='white',
-        bbox_inches='tight'
+        bbox_inches='tight',
     )
 
 
@@ -157,15 +158,15 @@ def train_evaluate_sklearn_classifier(
         y_true=y_test,
         y_pred=y_pred,
         title=title,
-        class_names=class_names
+        class_names=class_names,
     )
 
 
 def train_evaluate_lit_classifier(
-    model,
-    dataset_train,
-    dataset_val,
-    dataset_test,
+    model: LightningClassifier,
+    dataset_train: Dataset,
+    dataset_val: Optional[Dataset],
+    dataset_test: Optional[Dataset],
     *,
     max_epochs,
     batch_size,
@@ -179,7 +180,7 @@ def train_evaluate_lit_classifier(
 ) -> None:
     """Train a LightningClassifier and save a classification report and a confusion matrix"""
     if callbacks is None:
-        monitor = 'loss/val' if dataset_val is not None else None
+        monitor = 'loss/val' if dataset_val is not None else 'loss/train'
         callbacks = [ModelCheckpoint(monitor=monitor, mode='min')]
     assert any(isinstance(cb, ModelCheckpoint) for cb in callbacks)
 
@@ -189,14 +190,14 @@ def train_evaluate_lit_classifier(
         dataset_test,
         batch_size=batch_size,
         num_workers=num_workers,
-        collate_fn=collate_fn
+        collate_fn=collate_fn,
     )
 
     trainer = pl.Trainer(
         max_epochs=max_epochs,
         accelerator=accelerator,
         callbacks=callbacks,
-        default_root_dir=output_dir
+        default_root_dir=output_dir,
     )
     trainer.fit(
         model, train_dataloaders=loader_train, val_dataloaders=loader_val
@@ -208,9 +209,10 @@ def train_evaluate_lit_classifier(
         )
         trainer.test(best_model, loader_test)
 
-        y_true = torch.cat([batch[-1] for batch in loader_test]).view(
-            -1
-        )  # Assuming that target == batch[-1]
+        # Assuming that target == batch[-1]
+        y_true = [batch[-1] for batch in loader_test]
+        y_true = torch.cat(y_true).view(-1)
+
         y_pred, _ = zip(*trainer.predict(best_model, loader_test))
         y_pred = torch.cat(y_pred).view(-1)
 
@@ -225,7 +227,7 @@ def train_evaluate_lit_classifier(
             y_true=y_true,
             y_pred=y_pred,
             title=title,
-            class_names=class_names
+            class_names=class_names,
         )
 
 
@@ -255,7 +257,7 @@ def display_image_and_label(
         mpl.cm.ScalarMappable(norm=norm, cmap=cmap),
         ax=axs,
         shrink=0.9,
-        location='right'
+        location='right',
     )
     cbar.set_ticks(np.arange(cmap.N) - 0.5)
     cbar.set_ticklabels(class_names)
@@ -265,6 +267,7 @@ def display_image_and_label(
 
 
 def display_patch(dataset, idx, rgb, n_repeats=1, axs=None):
+
     def get_patch():
         patch, _ = dataset[idx]
         img = patch[rgb, ...]
@@ -290,6 +293,7 @@ def display_segmentation(
     dataset, idx, cmap, norm, class_names, rgb, n_repeats=1, axs=None
 ):
     """Plot an item of an Augmented CroppedDataset multiple times"""
+
     def get_crop():
         img, label = dataset[idx]
         img = img[rgb, ...]
@@ -313,7 +317,7 @@ def display_segmentation(
         mpl.cm.ScalarMappable(norm=norm, cmap=cmap),
         ax=axgrid,
         shrink=0.9,
-        location='right'
+        location='right',
     )
     cbar.set_ticks(np.arange(cmap.N) - 0.5)
     cbar.set_ticklabels(class_names)
@@ -458,8 +462,8 @@ def predict_image_unet(
     with rasterio.open(
         dst_path,
         'w',
-        height=dataset.image.shape[-2],
-        width=dataset.image.shape[-1],
+        height=height,
+        width=width,
         count=1,
         dtype=rasterio.uint8,
         driver='Gtiff',
@@ -501,7 +505,7 @@ def predict_all_images(
             norm=norm,
             class_names=class_names,
             rgb=rgb,
-            title=src_path.stem + suffix
+            title=src_path.stem + suffix,
         )
 
         plt.savefig(png_dst_path, facecolor='white', bbox_inches='tight')
@@ -509,13 +513,11 @@ def predict_all_images(
 
 def get_latest_checkpoint(output_dir) -> Path:
     output_dir = Path(output_dir)
-    checkpoints = list(output_dir.glob('lightning_logs/**/*.ckpt'))
+    ckpts = list(output_dir.glob('lightning_logs/**/*.ckpt'))
     pattern = re.compile(
         r'.*?version_(\d+)/checkpoints/epoch=(\d+)-step=(\d+).ckpt$'
     )
-    matches = (pattern.findall(path.as_posix()) for path in checkpoints)
-    zipped = [
-        (c, tuple(map(int, m[0]))) for c, m in zip(checkpoints, matches) if m
-    ]
-    latest_checkpoint = max(zipped, key=itemgetter(1))[0]
-    return latest_checkpoint
+    matches = (pattern.findall(path.as_posix()) for path in ckpts)
+    zipped = ((c, tuple(map(int, m[0]))) for c, m in zip(ckpts, matches) if m)
+    latest_ckpt, _ = max(zipped, key=itemgetter(1))
+    return latest_ckpt
