@@ -22,8 +22,9 @@ import pytorch_lightning as pl
 from pytorch_lightning.callbacks import EarlyStopping, ModelCheckpoint
 from torchmetrics import Accuracy
 
+# _______________________________LAB3 IMPORTS_______________________________
 
-# _______________________________LAB3 COPY-PASTE_______________________________
+
 class LightningClassifier(pl.LightningModule):
     """Basic template for a LightningModule classifier."""
 
@@ -33,7 +34,6 @@ class LightningClassifier(pl.LightningModule):
         self.cross_entropy = nn.CrossEntropyLoss(
             ignore_index=ignore_index if ignore_index is not None else -100
         )
-        # TODO: When ignore_index is not None the results seem incorrect.
         self.train_accuracy = Accuracy(
             num_classes=num_classes,
             ignore_index=ignore_index,
@@ -131,7 +131,7 @@ def evaluate_predictions(
     title=None,
     figsize=(6, 6),
 ) -> None:
-    """Compute and save a classification report and a confusion matrix"""
+    """Compute and save a classification report and a confusion matrix."""
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -180,7 +180,9 @@ def train_evaluate_lit_classifier(
     num_workers=2,
     accelerator='cpu',
 ) -> None:
-    """Train a LightningClassifier and save a classification report and a confusion matrix"""
+    """Train a LightningClassifier
+    and save a classification report and a confusion matrix.
+    """
     if callbacks is None:
         monitor = 'loss/val' if dataset_val is not None else 'loss/train'
         callbacks = [ModelCheckpoint(monitor=monitor, mode='min')]
@@ -242,7 +244,7 @@ class Ucf101(Dataset):
     def __init__(
         self,
         root_dir,
-        training: bool,
+        mode: str,
         transform=None,
         cache_fetched=False,
         cache_exist_ok=False,
@@ -254,10 +256,11 @@ class Ucf101(Dataset):
         it is advised to avoid using a DataLoader if not everything is cached.
         Instead, make a call to `cache_all` first.
         """
+        if mode not in {'train', 'test'}:
+            raise ValueError('Invalid `mode`. Valid values: "train", "test"')
 
         self.root_dir = Path(root_dir)
-        self.training = training
-        self.mode = 'train' if self.training else 'test'
+        self.mode = mode
         self.transform = transform
         self.cache_fetched = cache_fetched
 
@@ -360,7 +363,7 @@ def cache_all(source_root_dir):
     transform = ResNet18ExtractorVideo()
     dataset_train = Ucf101(
         root_dir=source_root_dir,
-        training=True,
+        mode='train',
         transform=transform,
         cache_fetched=True,
         cache_exist_ok=True,
@@ -368,7 +371,7 @@ def cache_all(source_root_dir):
     )
     dataset_test = Ucf101(
         root_dir=source_root_dir,
-        training=False,
+        mode='test',
         transform=transform,
         cache_fetched=True,
         cache_exist_ok=True,
@@ -471,6 +474,7 @@ def transformer_collate_fn(batch):
     T = max(lengths)
     src_key_padding_mask = torch.full((N, T), False, dtype=torch.bool)
     for i in range(N):
+        # TODO: There must be a way to vectorize this...
         src_key_padding_mask[i, lengths[i]:] = True
 
     return src, src_key_padding_mask, y
@@ -480,7 +484,7 @@ def transformer_collate_fn(batch):
 
 
 class GRUClassifier(LightningClassifier):
-    """A sequence to vector GRU with a final linear layer for classification"""
+    """A sequence to vector GRU with a final linear layer for classification."""
 
     def __init__(
         self,
@@ -540,7 +544,7 @@ class PositionalEncoder(nn.Module):
 
 class TransformerClassifier(LightningClassifier):
     """Transformer encoder with a maxpooling layer over the encoded outputs,
-    and a final linear layer for classification"""
+    and a final linear layer for classification."""
 
     def __init__(
         self,
@@ -604,7 +608,7 @@ def main():
 
     dataset_train_original = Ucf101(
         root_dir=data_root_dir,
-        training=True,
+        mode='train',
         transform=transform,
         cache_fetched=True,
         cache_exist_ok=True,
@@ -614,7 +618,7 @@ def main():
     )  # ~(15/18, 3/18) * 594 = (495, 99) samples
     dataset_test = Ucf101(
         root_dir=data_root_dir,
-        training=False,
+        mode='test',
         transform=transform,
         cache_fetched=True,
         cache_exist_ok=True,
