@@ -22,7 +22,7 @@ import pytorch_lightning as pl
 from pytorch_lightning.callbacks import EarlyStopping, ModelCheckpoint
 from torchmetrics import Accuracy
 
-# _______________________________LAB3 IMPORTS_______________________________
+# ________________________________ LAB3 IMPORTS ________________________________
 
 
 class LightningClassifier(pl.LightningModule):
