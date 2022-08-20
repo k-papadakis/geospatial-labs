@@ -1,16 +1,18 @@
-from lab3.utils import LightningClassifier, train_evaluate_lit_classifier
-
 from pathlib import Path
 import re
+import json
 
 import random
+from typing import Optional
 import numpy as np
 import matplotlib.pyplot as plt
+
+from sklearn.metrics import classification_report, ConfusionMatrixDisplay
 
 import torch
 from torch import nn
 import torch.nn.functional as F
-from torch.utils.data import Dataset, Subset
+from torch.utils.data import Dataset, Subset, DataLoader
 from torch.nn.utils.rnn import pad_sequence
 from torchvision.io import read_video
 from torchvision.models import resnet18, ResNet18_Weights
@@ -18,6 +20,218 @@ from torchvision.models.feature_extraction import create_feature_extractor
 
 import pytorch_lightning as pl
 from pytorch_lightning.callbacks import EarlyStopping, ModelCheckpoint
+from torchmetrics import Accuracy
+
+
+# _______________________________LAB3 COPY-PASTE_______________________________
+class LightningClassifier(pl.LightningModule):
+    """Basic template for a LightningModule classifier."""
+
+    def __init__(self, num_classes, ignore_index=None, mdmc_average=None):
+        super().__init__()
+        self.num_classes = num_classes
+        self.cross_entropy = nn.CrossEntropyLoss(
+            ignore_index=ignore_index if ignore_index is not None else -100
+        )
+        # TODO: When ignore_index is not None the results seem incorrect.
+        self.train_accuracy = Accuracy(
+            num_classes=num_classes,
+            ignore_index=ignore_index,
+            mdmc_average=mdmc_average,
+        )
+        self.val_accuracy = Accuracy(
+            num_classes=num_classes,
+            ignore_index=ignore_index,
+            mdmc_average=mdmc_average,
+        )
+        self.test_accuracy = Accuracy(
+            num_classes=num_classes,
+            ignore_index=ignore_index,
+            mdmc_average=mdmc_average,
+        )
+
+    def get_logits_and_target(self, batch):
+        x, *y = batch  # using * in case there is no target
+        y = y[0] if y else None
+        logits = self(x)
+        return logits, y
+
+    def training_step(self, batch, batch_idx, optimizer_idx=None):
+        logits, y = self.get_logits_and_target(batch)
+        loss = self.cross_entropy(logits, y)
+        self.train_accuracy(logits, y)
+        self.log_dict(
+            {
+                'loss/train': loss,
+                'accuracy/train': self.train_accuracy
+            }
+        )
+        return loss
+
+    def validation_step(self, batch, batch_idx):
+        logits, y = self.get_logits_and_target(batch)
+        loss = self.cross_entropy(logits, y)
+        self.val_accuracy(logits, y)
+        self.log_dict({'loss/val': loss, 'accuracy/val': self.val_accuracy})
+
+    def test_step(self, batch, batch_idx):
+        logits, y = self.get_logits_and_target(batch)
+        loss = self.cross_entropy(logits, y)
+        self.test_accuracy(logits, y)
+        self.log_dict({'loss/test': loss, 'accuracy/test': self.test_accuracy})
+
+    def predict_step(self, batch, batch_idx):
+        logits, _ = self.get_logits_and_target(batch)
+        preds = torch.argmax(logits, dim=1)
+        probs = F.softmax(logits, dim=1)
+        return preds, probs
+
+
+def create_dataloaders(
+    dataset_train: Optional[Dataset],
+    dataset_val: Optional[Dataset],
+    dataset_test: Optional[Dataset],
+    batch_size,
+    collate_fn=None,
+    num_workers=0
+):
+    loader_train = DataLoader(
+        dataset_train,
+        shuffle=True,
+        collate_fn=collate_fn,
+        batch_size=batch_size,
+        num_workers=num_workers,
+    ) if dataset_train is not None else None
+
+    loader_val = DataLoader(
+        dataset_val,
+        shuffle=False,
+        collate_fn=collate_fn,
+        batch_size=batch_size,
+        num_workers=num_workers,
+    ) if dataset_val is not None else None
+
+    loader_test = DataLoader(
+        dataset_test,
+        shuffle=False,
+        collate_fn=collate_fn,
+        batch_size=batch_size,
+        num_workers=num_workers,
+    ) if dataset_test is not None else None
+
+    return loader_train, loader_val, loader_test
+
+
+def evaluate_predictions(
+    output_dir,
+    y_true,
+    y_pred,
+    class_names=None,
+    verbose=True,
+    title=None,
+    figsize=(6, 6),
+) -> None:
+    """Compute and save a classification report and a confusion matrix"""
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    if verbose:
+        print(
+            classification_report(
+                y_true, y_pred, target_names=class_names, output_dict=False
+            )
+        )
+    report = classification_report(
+        y_true, y_pred, target_names=class_names, output_dict=True
+    )
+    with open(output_dir / 'classification_report.json', 'w') as f:
+        json.dump(report, f, indent=4)
+
+    fig, ax = plt.subplots(figsize=figsize)
+    ConfusionMatrixDisplay.from_predictions(
+        y_true,
+        y_pred,
+        display_labels=class_names,
+        xticks_rotation=90,
+        ax=ax,
+        colorbar=False,
+    )
+    ax.set_title(title)
+    fig.savefig(
+        output_dir / 'confusion_matrix.pdf',
+        facecolor='white',
+        bbox_inches='tight',
+    )
+
+
+def train_evaluate_lit_classifier(
+    model: LightningClassifier,
+    dataset_train: Dataset,
+    dataset_val: Optional[Dataset],
+    dataset_test: Optional[Dataset],
+    *,
+    max_epochs,
+    batch_size,
+    class_names,
+    output_dir,
+    ignore_index=None,
+    callbacks=None,
+    collate_fn=None,
+    num_workers=2,
+    accelerator='cpu',
+) -> None:
+    """Train a LightningClassifier and save a classification report and a confusion matrix"""
+    if callbacks is None:
+        monitor = 'loss/val' if dataset_val is not None else 'loss/train'
+        callbacks = [ModelCheckpoint(monitor=monitor, mode='min')]
+    assert any(isinstance(cb, ModelCheckpoint) for cb in callbacks)
+
+    loader_train, loader_val, loader_test = create_dataloaders(
+        dataset_train,
+        dataset_val,
+        dataset_test,
+        batch_size=batch_size,
+        num_workers=num_workers,
+        collate_fn=collate_fn,
+    )
+
+    trainer = pl.Trainer(
+        max_epochs=max_epochs,
+        accelerator=accelerator,
+        callbacks=callbacks,
+        default_root_dir=output_dir,
+    )
+    trainer.fit(
+        model, train_dataloaders=loader_train, val_dataloaders=loader_val
+    )
+
+    if dataset_test is not None:
+        best_model = trainer.model.load_from_checkpoint(
+            trainer.checkpoint_callback.best_model_path
+        )
+        trainer.test(best_model, loader_test)
+
+        # Assuming that target == batch[-1]
+        y_true = [batch[-1] for batch in loader_test]
+        y_true = torch.cat(y_true).view(-1)
+
+        y_pred, _ = zip(*trainer.predict(best_model, loader_test))
+        y_pred = torch.cat(y_pred).view(-1)
+
+        if ignore_index is not None:
+            keep_mask = y_true != ignore_index
+            y_true = y_true[keep_mask]
+            y_pred = y_pred[keep_mask]
+
+        title = best_model.__class__.__name__
+        evaluate_predictions(
+            output_dir=output_dir,
+            y_true=y_true,
+            y_pred=y_pred,
+            title=title,
+            class_names=class_names,
+        )
+
 
 # __________________________________ DATASETS __________________________________
 
@@ -187,9 +401,12 @@ def train_val_split(dataset_train_original, n_groups_val, seed=None):
     """Splits train UCF101 dataset into train and validation datasets.
     
     Every class in the train UCF101 directory has 18 video groups,
-    and every video group has roughly the same amount of videos, which are cuts of a single original video.
-    A random selection of `n_groups_val` video groups of each class will comprise our validation set,
-    and the remaining `18 - n_groups_val` video groups will comprise our validation set.
+    and every video group has roughly the same amount of videos,
+    which are cuts of a single original video.
+    A random selection of `n_groups_val` video groups of each class
+    will comprise our validation set,
+    and the remaining `18 - n_groups_val` video groups
+    will comprise our validation set.
     
     More specific statistics about the dataset can be found below.
     
@@ -383,7 +600,7 @@ def main():
     pl.utilities.seed.seed_everything(42)
     data_root_dir = 'data'
     cache_all(data_root_dir)
-    transform = None  # Hack to save some memory. Requires cache_all(root_dir),
+    transform = None  # Hack to save some memory. Requires cache_all(root_dir).
 
     dataset_train_original = Ucf101(
         root_dir=data_root_dir,
@@ -402,7 +619,6 @@ def main():
         cache_fetched=True,
         cache_exist_ok=True,
     )  # 224 samples
-    # max(x.shape[0] for x, _ in itertools.chain(dataset_train, dataset_test_original)) == 528
     print(f'Train samples: {len(dataset_train)}')
     print(f'Validation samples {len(dataset_val)}')
     print(f'Test samples: {len(dataset_test)}\n')

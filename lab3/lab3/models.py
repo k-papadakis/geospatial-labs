@@ -121,7 +121,7 @@ class CNNBlock(nn.Module):
 
 
 class CNNClassifier(LightningClassifier):
-    """Deep CNN with skip connections between convolutions that are two steps away
+    """Deep CNN with skip connections between convolutions that are two steps away.
     Expects a 15 by 15 image.
     """
 

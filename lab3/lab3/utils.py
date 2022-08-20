@@ -133,7 +133,12 @@ def evaluate_predictions(
 
     fig, ax = plt.subplots(figsize=figsize)
     ConfusionMatrixDisplay.from_predictions(
-        y_true, y_pred, display_labels=class_names, xticks_rotation=90, ax=ax
+        y_true,
+        y_pred,
+        display_labels=class_names,
+        xticks_rotation=90,
+        ax=ax,
+        colorbar=False,
     )
     ax.set_title(title)
     fig.savefig(
