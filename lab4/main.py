@@ -464,19 +464,10 @@ def rnn_collate_fn(batch):
 
 def transformer_collate_fn(batch):
     seqs, y = map(list, zip(*batch))
-
     src = pad_sequence(seqs, batch_first=True)
-
+    lengths = torch.asarray(list(map(len, seqs)))
+    src_key_padding_mask = torch.arange(lengths.max()) >= lengths[..., None]
     y = torch.stack(y)
-
-    lengths = list(map(len, seqs))
-    N = len(lengths)
-    T = max(lengths)
-    src_key_padding_mask = torch.full((N, T), False, dtype=torch.bool)
-    for i in range(N):
-        # TODO: There must be a way to vectorize this...
-        src_key_padding_mask[i, lengths[i]:] = True
-
     return src, src_key_padding_mask, y
 
 
