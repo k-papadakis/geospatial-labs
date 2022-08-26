@@ -1,10 +1,14 @@
 # %%
+import itertools
 from os import PathLike
 from pathlib import Path
-from typing import (Callable, List, Literal, Optional, Tuple, Dict, TypedDict)
+from typing import (
+    Any, Callable, List, Literal, Optional, Tuple, Dict, TypedDict
+)
 
 import numpy as np
 import torch
+from torch import nn
 from torch import Tensor
 from torch.optim import Adam, Optimizer
 from torch.utils.data import Dataset, DataLoader
@@ -16,7 +20,7 @@ from torchvision.models.detection.backbone_utils import (
     resnet_fpn_backbone, BackboneWithFPN
 )
 from torchvision.models.detection.image_list import ImageList
-from torchvision.io import read_image
+from torchvision.io import read_image, ImageReadMode
 import pytorch_lightning as pl
 from pytorch_lightning.callbacks import ModelCheckpoint
 
@@ -61,7 +65,7 @@ class ODDataset(Dataset):
         image_path = self.root_dir / self.mode / 'images' / f'{name}.jpg'
         targets_path = self.root_dir / self.mode / 'labels' / f'{name}.txt'
 
-        image = read_image(str(image_path))
+        image = read_image(str(image_path), ImageReadMode.RGB)
         image = convert_image_dtype(image, torch.float32)
 
         targets_tensor = torch.from_numpy(
@@ -86,7 +90,6 @@ def transpose(batch):
     return tuple(map(list, zip(*batch)))
 
 
-# %%
 def get_resnet50_fpn_backbone() -> BackboneWithFPN:
     return resnet_fpn_backbone(
         backbone_name='resnet50',
@@ -98,7 +101,7 @@ def get_resnet50_fpn_backbone() -> BackboneWithFPN:
 class LitFasterRCNNPhase1(pl.LightningModule):
     # Not implementing val_step, test_step,
     # because the rpn doesn't output loss if rpn.training.
-    # The rpn has batchnorm layers, so it hard to disable them manually.
+    # The rpn has batchnorm layers, so it is hard to disable them manually.
 
     def __init__(
         self,
@@ -107,7 +110,7 @@ class LitFasterRCNNPhase1(pl.LightningModule):
         backbone_lr: float = 1e-5
     ) -> None:
         super().__init__()
-        self.save_hyperparameters()
+        self.save_hyperparameters(ignore=['model'])
         self.model = model
         self.rpn_lr = rpn_lr
         self.backbone_lr = backbone_lr
@@ -120,7 +123,7 @@ class LitFasterRCNNPhase1(pl.LightningModule):
         image_list: ImageList
         features: Dict[str, Tensor]
         proposals: List[Tensor]
-        proposal_losses: RPNLossesDict | EmptyDict  # is empty if model.training
+        proposal_losses: RPNLossesDict | EmptyDict  # is empty if rpn.training
 
         image_list, targets = self.model.transform(images, targets)
         features = self.model.backbone(image_list.tensors)
@@ -141,7 +144,7 @@ class LitFasterRCNNPhase1(pl.LightningModule):
             proposal_losses['loss_objectness'] +
             proposal_losses['loss_rpn_box_reg']
         )
-        self.log_dict(proposal_losses | {'loss_combined': loss_combined})
+        self.log_dict({**proposal_losses, 'loss_combined': loss_combined})
         return loss_combined
 
     def configure_optimizers(self) -> Tuple[Optimizer, Optimizer]:
@@ -170,22 +173,29 @@ dataset_val = ODDataset(data_root_dir, 'val')
 dataset_test = ODDataset(data_root_dir, 'test')
 
 loader_train = DataLoader(
-    dataset_train, batch_size=8, shuffle=True, collate_fn=transpose
+    dataset_train, 6, shuffle=True, collate_fn=transpose, num_workers=2
+)
+loader_train_unshuffled = DataLoader(
+    dataset_train, 6, shuffle=False, collate_fn=transpose, num_workers=2
 )
 
-model_entire = FasterRCNN(get_resnet50_fpn_backbone(), 7)
-p1 = LitFasterRCNNPhase1(model_entire)
+model_entire = torch.jit.script(FasterRCNN(get_resnet50_fpn_backbone(), 7))
+
+phase1_dir = output_dir / 'faster_rccn' / 'phase_1'
+p1 = LitFasterRCNNPhase1(model_entire)  # type: ignore
 callbacks = ModelCheckpoint(monitor='loss_combined', mode='min')
 trainer = pl.Trainer(
-    max_epochs=2,
+    max_epochs=10,
     accelerator='gpu',
     callbacks=callbacks,
-    default_root_dir=str(output_dir / 'faster_rccn' / 'phase_1')
+    default_root_dir=str(phase1_dir)
 )
 trainer.fit(p1, train_dataloaders=loader_train)
+preds = trainer.predict(p1, loader_train_unshuffled)
+rpn_cache = list(itertools.chain.from_iterable(preds))  # type: ignore
+torch.save(rpn_cache, Path(trainer.log_dir) / 'rpn_cache.pt')  # type: ignore
 
 # %%
-# TODO?: jit
 # TODO: Make 4 separate Lightning Modules, one for each phase.
 #  On __init__ use a pre-initialized Faster R-CNN
 # TODO: When phase 1 finishes, use inference and cache all the rpn preds.
