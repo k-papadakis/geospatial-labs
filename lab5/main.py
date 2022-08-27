@@ -1,11 +1,13 @@
 # %%
 import itertools
+from collections import OrderedDict
+from operator import itemgetter
 from os import PathLike
 from pathlib import Path
-from typing import (
-    Any, Callable, List, Literal, Optional, Tuple, Dict, TypedDict
-)
+import re
+from typing import (Callable, List, Literal, Optional, Tuple, Dict, TypedDict)
 
+from tqdm import tqdm
 import numpy as np
 import torch
 from torch import nn
@@ -13,8 +15,9 @@ from torch import Tensor
 from torch.optim import Adam, Optimizer
 from torch.utils.data import Dataset, DataLoader
 from torchvision.transforms.functional import convert_image_dtype
-from torchvision.models.detection import FasterRCNN
-from torchvision.models.detection.transform import GeneralizedRCNNTransform
+from torchvision.models.detection import (
+    FasterRCNN, fasterrcnn_resnet50_fpn, FasterRCNN_ResNet50_FPN_Weights
+)
 from torchvision.models import ResNet50_Weights
 from torchvision.models.detection.backbone_utils import (
     resnet_fpn_backbone, BackboneWithFPN
@@ -23,6 +26,10 @@ from torchvision.models.detection.image_list import ImageList
 from torchvision.io import read_image, ImageReadMode
 import pytorch_lightning as pl
 from pytorch_lightning.callbacks import ModelCheckpoint
+
+
+class EmptyDict(TypedDict):
+    pass
 
 
 class TargetsDict(TypedDict):
@@ -35,8 +42,15 @@ class RPNLossesDict(TypedDict):
     loss_rpn_box_reg: Tensor
 
 
-class EmptyDict(TypedDict):
-    pass
+class DetectionsDict(TypedDict):
+    labels: Tensor
+    boxes: Tensor
+    scores: Tensor
+
+
+class DetectorLossesDict(TypedDict):
+    loss_classifier: Tensor
+    loss_box_reg: Tensor
 
 
 class ODDataset(Dataset):
@@ -105,25 +119,23 @@ class LitFasterRCNNPhase1(pl.LightningModule):
 
     def __init__(
         self,
-        model: FasterRCNN,
-        rpn_lr: float = 1e-3,
-        backbone_lr: float = 1e-5
+        num_classes: int,
+        lr: float = 1e-4
     ) -> None:
         super().__init__()
-        self.save_hyperparameters(ignore=['model'])
-        self.model = model
-        self.rpn_lr = rpn_lr
-        self.backbone_lr = backbone_lr
+        self.save_hyperparameters()
+        self.model = FasterRCNN(get_resnet50_fpn_backbone(), num_classes)
+        self.lr = lr
 
     def forward(
         self,
         images: List[Tensor],
-        targets: Optional[List[Dict[str, Tensor]]] = None
+        targets: Optional[TargetsDict] = None
     ) -> Tuple[List[Tensor], RPNLossesDict | EmptyDict]:
         image_list: ImageList
         features: Dict[str, Tensor]
         proposals: List[Tensor]
-        proposal_losses: RPNLossesDict | EmptyDict  # is empty if rpn.training
+        proposal_losses: RPNLossesDict | EmptyDict  # empty if not training
 
         image_list, targets = self.model.transform(images, targets)
         features = self.model.backbone(image_list.tensors)
@@ -140,68 +152,330 @@ class LitFasterRCNNPhase1(pl.LightningModule):
     ) -> Tensor:
         images, targets = batch
         _, proposal_losses = self(images, targets)
-        loss_combined = (
+        loss_rpn = (
             proposal_losses['loss_objectness'] +
             proposal_losses['loss_rpn_box_reg']
         )
-        self.log_dict({**proposal_losses, 'loss_combined': loss_combined})
-        return loss_combined
+        self.log_dict({**proposal_losses, 'loss_rpn': loss_rpn})
+        return loss_rpn
 
-    def configure_optimizers(self) -> Tuple[Optimizer, Optimizer]:
-        backbone_optim = Adam(
-            self.model.backbone.parameters(), lr=self.backbone_lr
+    def configure_optimizers(self) -> Optimizer:
+        params = itertools.chain(
+            self.model.backbone.parameters(), self.model.rpn.parameters()
         )
-        rpn_optim = Adam(self.model.rpn.parameters(), lr=self.rpn_lr)
-        return backbone_optim, rpn_optim
+        return Adam(params, lr=self.lr)
+    
+    # def predict_step(
+    #     self,
+    #     batch: Tuple[List[Tensor], List[TargetsDict]],
+    #     batch_idx: int,
+    # ) -> List[Tensor]:
+    #     images, _ = batch
+    #     proposals, _ = self(images)
+    #     return proposals
 
-    def predict_step(
+
+@torch.inference_mode()
+def _cache_phase1(
+    p1: LitFasterRCNNPhase1,
+    dataset: ODDataset,
+    cache_dir: str | PathLike,
+    accelerator: Literal['cpu', 'gpu'] = 'cpu',
+    batch_size=8,
+):
+    images: List[Tensor]
+    proposals: List[Tensor]  # Tensor shape: (1000, 4)
+
+    print('Caching Phase 1')
+
+    # Setup
+    cache_dir = Path(cache_dir)
+    cache_dir.mkdir(exist_ok=True, parents=True)
+    loader = DataLoader(
+        dataset, batch_size=batch_size, shuffle=False, collate_fn=transpose
+    )
+    device = torch.device(accelerator if accelerator != 'gpu' else 'cuda')
+
+    was_training = p1.training
+    p1.train(False)
+    p1.to(device)
+
+    # Caching
+    names = iter(dataset.image_names)
+    for images, _ in tqdm(loader):
+        images = [img.to(device) for img in images]
+        proposals, _ = p1(images)
+        for proposal in proposals:
+            torch.save(proposal.cpu(), cache_dir / f'{next(names)}.pt')
+
+    # Teardown
+    p1.train(was_training)
+
+
+def train_phase1(
+    data_root_dir: str | PathLike,
+    *,
+    output_dir: str | PathLike,
+    accelerator: Literal['cpu', 'gpu'] = 'cpu',
+    max_epochs: int = 10,
+    batch_size: int = 8,
+    num_workers: int = 2,
+) -> Tuple[str, str]:
+
+    dataset = ODDataset(data_root_dir, 'train')
+    num_classes = len(dataset.class_names)
+
+    loader = DataLoader(
+        dataset,
+        batch_size=batch_size,
+        shuffle=True,
+        collate_fn=transpose,
+        num_workers=num_workers,
+    )
+
+    # Train the RPN and the Backbone
+    p1 = LitFasterRCNNPhase1(num_classes)
+    trainer = pl.Trainer(
+        max_epochs=max_epochs,
+        accelerator=accelerator,
+        default_root_dir=str(output_dir),
+        callbacks=[
+            ModelCheckpoint(
+                monitor='loss_rpn',
+                mode='min',
+                save_weights_only=True,
+            ),
+        ]
+    )
+
+    # Cache the RPN proposals for Phase 2.
+    trainer.fit(p1, train_dataloaders=loader)
+    best_ckpt: str = trainer.checkpoint_callback.best_model_path  # type: ignore
+    p1.load_from_checkpoint(best_ckpt)
+    cache_dir = str(Path(trainer.log_dir) / 'rpn_cache')  # type: ignore
+    _cache_phase1(
+        p1,
+        dataset,
+        cache_dir,
+        accelerator=accelerator,
+        batch_size=batch_size,
+    )
+
+    return best_ckpt, cache_dir
+
+
+class Phase2Dataset(Dataset):
+
+    def __init__(
+        self, root_dir: str | PathLike, mode: Literal['train', 'val', 'test'],
+        proposals_dir: str | PathLike
+    ) -> None:
+
+        self.dataset = ODDataset(root_dir, mode)
+        self.proposals_dir = Path(proposals_dir)
+
+    def __len__(self):
+        return len(self.dataset)
+
+    def __getitem__(self, idx) -> Tuple[Tensor, Tensor, TargetsDict]:
+        image, targets = self.dataset[idx]
+        proposals = torch.load(
+            self.proposals_dir / f'{self.dataset.image_names[idx]}.pt'
+        )
+        return image, proposals, targets
+
+
+class LitFasterRCNNPhase2(pl.LightningModule):
+
+    def __init__(
         self,
-        batch: Tuple[List[Tensor], List[TargetsDict]],
+        num_classes: int,
+        lr: float = 1e-4
+    ) -> None:
+        super().__init__()
+        self.save_hyperparameters()
+        self.model = FasterRCNN(get_resnet50_fpn_backbone(), num_classes)
+        self.lr = lr
+
+    def forward(
+        self,
+        images: List[Tensor],
+        proposals: List[Tensor],
+        targets: Optional[TargetsDict] = None,
+    ) -> Tuple[List[DetectionsDict], DetectorLossesDict | EmptyDict]:
+        image_list: ImageList
+        features: Dict[str, Tensor]  # Keys: '0', '1', '2', '3', 'pool'
+        original_image_sizes: List[Tuple[int, int]]
+        detections: List[DetectionsDict]
+        detector_losses: DetectorLossesDict | EmptyDict  # empty if not training
+
+        original_image_sizes = [tuple(img.shape[-2:]) for img in images]
+        image_list, targets = self.model.transform(images, targets)
+        features = self.model.backbone(image_list.tensors)
+        detections, detector_losses = self.model.roi_heads(
+            features, proposals, image_list.image_sizes, targets
+        )
+        detections = self.model.transform.postprocess(  # type: ignore
+            detections, image_list.image_sizes, original_image_sizes
+        )
+        return detections, detector_losses
+
+    def training_step(
+        self,
+        batch: Tuple[List[Tensor], List[Tensor], List[TargetsDict]],
         batch_idx: int,
-    ) -> List[Tensor]:
-        images, _ = batch
-        proposals, _ = self(images)
-        return proposals
+        optimizer_idx: Optional[int] = None
+    ) -> Tensor:
+        images, proposals, targets = batch
+
+        _, detector_losses = self(images, proposals, targets)
+        loss_detector = (
+            detector_losses['loss_classifier'] + detector_losses['loss_box_reg']
+        )
+        self.log_dict({**detector_losses, 'loss_detector': loss_detector})
+        return loss_detector
+
+    def configure_optimizers(self) -> Optimizer:
+        params = itertools.chain(
+            self.model.backbone.parameters(), self.model.roi_heads.parameters()
+        )
+        return Adam(params, lr=self.lr)
+
+    # def predict_step(
+    #     self,
+    #     batch: Tuple[List[Tensor], List[Tensor], List[TargetsDict]],
+    #     batch_idx: int,
+    # ) -> List[Tensor]:
+    #     images, proposals, _ = batch
+    #     detections, _ = self(images, proposals)
+    #     return detections
 
 
-data_root_dir = Path('data')
-output_dir = Path('output')
-output_dir.mkdir(exist_ok=True)
+@torch.inference_mode()
+def _cache_phase2(
+    p2: LitFasterRCNNPhase2,
+    dataset: Phase2Dataset,
+    cache_dir: str | PathLike,
+    accelerator: Literal['cpu', 'gpu'] = 'cpu',
+    batch_size=8,
+):
+    images: List[Tensor]
+    image_list: ImageList
 
-dataset_train = ODDataset(data_root_dir, 'train')
-dataset_val = ODDataset(data_root_dir, 'val')
-dataset_test = ODDataset(data_root_dir, 'test')
+    print('Caching Phase 2')
 
-loader_train = DataLoader(
-    dataset_train, 6, shuffle=True, collate_fn=transpose, num_workers=2
-)
-loader_train_unshuffled = DataLoader(
-    dataset_train, 6, shuffle=False, collate_fn=transpose, num_workers=2
-)
+    # Setup
+    cache_dir = Path(cache_dir)
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    loader = DataLoader(
+        dataset, batch_size=batch_size, shuffle=False, collate_fn=transpose
+    )
+    device = torch.device(accelerator if accelerator != 'gpu' else 'cuda')
 
-model_entire = torch.jit.script(FasterRCNN(get_resnet50_fpn_backbone(), 7))
+    was_training = p2.training
+    p2.train(False)
+    p2.to(device)
 
-phase1_dir = output_dir / 'faster_rccn' / 'phase_1'
-p1 = LitFasterRCNNPhase1(model_entire)  # type: ignore
-callbacks = ModelCheckpoint(monitor='loss_combined', mode='min')
-trainer = pl.Trainer(
-    max_epochs=10,
-    accelerator='gpu',
-    callbacks=callbacks,
-    default_root_dir=str(phase1_dir)
-)
-trainer.fit(p1, train_dataloaders=loader_train)
-preds = trainer.predict(p1, loader_train_unshuffled)
-rpn_cache = list(itertools.chain.from_iterable(preds))  # type: ignore
-torch.save(rpn_cache, Path(trainer.log_dir) / 'rpn_cache.pt')  # type: ignore
+    # Caching
+    names = iter(dataset.dataset.image_names)
+    for images, _, _ in tqdm(loader):
+        images = [img.to(device) for img in images]
+        image_list, _ = p2.model.transform(images)
+        features = p2.model.backbone(image_list.tensors)
 
+        for i in range(len(images)):
+            d = {
+                'features': {k: v[i].cpu() for k, v in features.items()},
+                'original_image_size': tuple(images[i].shape[-2:]),
+                'image_size': image_list.image_sizes[i],
+            }
+            torch.save(d, cache_dir / f'{next(names)}.pt')
+
+    # Teardown
+    p2.train(was_training)
+
+
+def train_phase_2(
+    data_root_dir: str | PathLike,
+    *,
+    output_dir: str | PathLike,
+    best_ckpt_p1: str,
+    rpn_cache_dir: str,
+    accelerator: Literal['cpu', 'gpu'] = 'cpu',
+    max_epochs: int = 10,
+    batch_size: int = 8,
+    num_workers: int = 2,
+):  # TODO: return features cache and ckpt paths
+    dataset = Phase2Dataset(data_root_dir, 'train', proposals_dir=rpn_cache_dir)
+    loader = DataLoader(
+        dataset,
+        batch_size=batch_size,
+        shuffle=True,
+        collate_fn=transpose,
+        num_workers=num_workers,
+    )
+    loader_unshuffled = DataLoader(
+        dataset,
+        batch_size=batch_size,
+        shuffle=False,
+        collate_fn=transpose,
+        num_workers=num_workers,
+    )
+
+    p2: LitFasterRCNNPhase2
+    p2 = LitFasterRCNNPhase2.load_from_checkpoint(best_ckpt_p1)
+    p2.model.backbone = get_resnet50_fpn_backbone()
+
+    trainer = pl.Trainer(
+        max_epochs=max_epochs,
+        accelerator=accelerator,
+        default_root_dir=str(output_dir),
+        callbacks=[
+            ModelCheckpoint(
+                monitor='loss_detector',
+                mode='min',
+                save_weights_only=True,
+            ),
+        ]
+    )
+    trainer.fit(p2, train_dataloaders=loader)
+    best_ckpt_p2: str = trainer.checkpoint_callback.best_model_path  # type: ignore
+    p2.load_from_checkpoint(best_ckpt_p2)
+    cache_dir = str(Path(trainer.log_dir) / 'features_cache')  # type: ignore
+    _cache_phase2(
+        p2,
+        dataset,
+        cache_dir,
+        accelerator=accelerator,
+        batch_size=batch_size,
+    )
+    
+    return best_ckpt_p2, cache_dir
+
+
+def main() -> None:
+    pl.seed_everything(42)
+    data_root_dir = Path('data')
+    output_dir = Path('output')
+    output_dir.mkdir(exist_ok=True, parents=True)
+    accelerator = 'gpu' if torch.cuda.is_available() else 'cpu'
+
+    best_ckpt_p1, rpn_cache_dir = train_phase1(
+        data_root_dir,
+        output_dir=output_dir / 'faster_rcnn' / 'phase1',
+        accelerator=accelerator,
+        max_epochs=1,
+    )
+
+    best_ckpt_p2, cache_dir = train_phase_2(
+        data_root_dir,
+        output_dir=output_dir / 'faster_rcnn' / 'phase2',
+        best_ckpt_p1=best_ckpt_p1,
+        rpn_cache_dir=rpn_cache_dir,
+        accelerator=accelerator,
+        max_epochs=1,
+    )
+
+
+main()
 # %%
-# TODO: Make 4 separate Lightning Modules, one for each phase.
-#  On __init__ use a pre-initialized Faster R-CNN
-# TODO: When phase 1 finishes, use inference and cache all the rpn preds.
-#  Zip (somehow) the original and the cached and create a DataLoader.
-#  Use this new DataLoader to perform phase 2 train.
-#
-# loader_train_unshuffled = DataLoader(
-#     dataset_train, batch_size=8, shuffle=True, collate_fn=transpose
-# )
