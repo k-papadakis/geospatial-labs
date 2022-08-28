@@ -3,7 +3,7 @@ env
 *.pt
 lightning_logs/
 data/
-data_full/
+data_small/
 .vscode
 __pycache__/
 temp.py
