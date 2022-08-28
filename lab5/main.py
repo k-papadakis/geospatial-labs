@@ -1,12 +1,14 @@
 # %%
+import functools
 import itertools
 from collections import OrderedDict
 from operator import itemgetter
 from os import PathLike
 from pathlib import Path
 import re
-from typing import (Any, Callable, List, Literal, Optional, Tuple, Dict, TypeVar, TypedDict)
-
+from typing import (
+    Any, Callable, List, Literal, Optional, Tuple, Dict, TypeVar, TypedDict
+)
 
 from tqdm import tqdm
 import numpy as np
@@ -29,8 +31,9 @@ import pytorch_lightning as pl
 from pytorch_lightning.callbacks import EarlyStopping, ModelCheckpoint
 
 # IMPORTANT: Install torchmetrics via
-#  pip install -e git+https://github.com/k-papadakis/metrics.git#egg=torchmetrics
-#  otherwise MeanAveragePrecision won't work.
+# pip install -e git+https://github.com/k-papadakis/metrics.git#egg=torchmetrics
+# otherwise MeanAveragePrecision might not work.
+# See this https://github.com/Lightning-AI/metrics/issues/1147
 from torchmetrics.detection.mean_ap import MeanAveragePrecision
 
 
@@ -50,8 +53,8 @@ class LossesDict(TypedDict):
     # Detector losses
     loss_classifier: Tensor
     loss_box_reg: Tensor
-    
-    
+
+
 class DetectionsDict(TypedDict):
     labels: Tensor
     boxes: Tensor
@@ -145,7 +148,7 @@ def get_resnet50_fpn_backbone() -> BackboneWithFPN:
     return resnet_fpn_backbone(
         backbone_name='resnet50',
         weights=ResNet50_Weights.DEFAULT,
-        trainable_layers=3
+        trainable_layers=2
     )
 
 
@@ -156,17 +159,16 @@ class LitFasterRCNN(pl.LightningModule):
         num_classes: int,
         lr: float = 1e-4,
         phase: Literal[1, 2, 3, 4] = 1
-        ) -> None:
-        # num_classes (int): number of output classes of the model (including the background).
+    ) -> None:
+        # num_classes includes the background!
         super().__init__()
         self.save_hyperparameters()
-
         self.lr = lr
         self.phase = phase
         backbone = get_resnet50_fpn_backbone()
         self.model = FasterRCNN(backbone, num_classes)
         self.val_mean_ap = MeanAveragePrecision()
-        self.test_mean_ap = MeanAveragePrecision()
+        self.test_mean_ap = MeanAveragePrecision(class_metrics=True)
 
     def forward(
         self,
@@ -181,34 +183,32 @@ class LitFasterRCNN(pl.LightningModule):
     ) -> Tensor:
         images, targets = batch
         losses: LossesDict = self.model(images, targets)
-        
+
         match self.phase:
             case 1 | 3:
-                loss_sum = losses['loss_objectness'] + losses['loss_rpn_box_reg']
+                a, b = 'loss_objectness', 'loss_rpn_box_reg'
+                loss_sum = losses[a] + losses[b]
                 self.log_dict(
-                    (
-                        {f'train_{k}': losses[k] for k in ('loss_objectness', 'loss_rpn_box_reg')}
-                        | {'train_loss_sum': loss_sum}
-                    ),
+                    {f'train_{k}': losses[k] for k in (a, b)}
+                    | {'train_loss_sum': loss_sum},
                     batch_size=len(images)
                 )
                 return loss_sum
             case 2 | 4:
-                loss_sum = losses['loss_classifier'] + losses['loss_box_reg']
+                a, b = 'loss_classifier', 'loss_box_reg'
+                loss_sum = losses[a] + losses[b]
                 self.log_dict(
-                    (
-                        {f'train_{k}': losses[k] for k in ('loss_classifier', 'loss_box_reg')}
-                        | {'train_loss_sum': loss_sum}
-                    ),
+                    {f'train_{k}': losses[k] for k in (a, b)} 
+                    | {'train_loss_sum': loss_sum},
                     batch_size=len(images)
                 )
                 return loss_sum
             case _:
                 raise ValueError(f'Invalid phase value {self.phase}')
-        
+
     def configure_optimizers(self) -> Optimizer:
         model = self.model
-        
+
         match self.phase:
             case 1:
                 params = itertools.chain(
@@ -224,140 +224,189 @@ class LitFasterRCNN(pl.LightningModule):
                 params = model.roi_heads.parameters()
             case _:
                 raise ValueError(f'Invalid phase value {self.phase}')
-            
+
         return Adam(params, lr=self.lr)
-    
+
     def validation_step(
         self, batch: Tuple[List[Tensor], List[TargetsDict]], batch_idx: int
     ) -> None:
         images, targets = batch
         detections: DetectionsDict = self(images)
         self.val_mean_ap.update(detections, targets)  # type: ignore
-        
+
     def test_step(
         self, batch: Tuple[List[Tensor], List[TargetsDict]], batch_idx: int
     ) -> None:
         images, targets = batch
         detections: DetectionsDict = self(images)
         self.test_mean_ap.update(detections, targets)  # type: ignore
-    
+
     def validation_epoch_end(self, outputs):
+        metrics = self.val_mean_ap.compute()
         self.log_dict(
-            {f'val_{k}': v for k, v in self.val_mean_ap.compute().items()}
+            {f'val_{k}': v for k, v in metrics.items()}
         )
         self.val_mean_ap.reset()
-        
+
     def test_epoch_end(self, outputs):
+        metrics = self.test_mean_ap.compute()
+        
+        map_per_class = metrics.pop('map_per_class')
+        mar_100_per_class = metrics.pop('mar_100_per_class')
+        
+        metrics |= {f'map_class_{i}': x for i, x in enumerate(map_per_class)}
+        metrics |= {f'mar_100_class_{i}': x for i, x in enumerate(mar_100_per_class)}
+        
         self.log_dict(
-            {f'test_{k}': v for k, v in self.test_mean_ap.compute().items()}
+            {f'test_{k}': v for k, v in metrics.items()}
         )
         self.test_mean_ap.reset()
-        
-        
-def train_phase1(
-    *,
-    output_dir: str | PathLike,
-    loader_train: DataLoader,
-    num_classes: int,
-    lr: float = 5e-5,
-    max_epochs: int = 10,
-    accelerator: Literal['cpu', 'gpu'] = 'cpu',
-    log_every_n_steps: int = 10
-) -> str:
-    # No validation or test since we don't tune the detector
-    output_dir = Path(output_dir)
-    
-    model = LitFasterRCNN(num_classes, lr=lr, phase=1)
-    
-    trainer = pl.Trainer(
-        default_root_dir=str(output_dir / 'phase1'),
-        callbacks = [
-            ModelCheckpoint(monitor='train_loss_sum', mode='min', save_weights_only=True),
-        ],
-        max_epochs=max_epochs,
-        accelerator=accelerator,
-        log_every_n_steps=log_every_n_steps,
-    )
-    trainer.fit(model, loader_train)
-    
-    ckpt: str = trainer.checkpoint_callback.best_model_path  # type: ignore
-    return ckpt
 
-def train_phase2(
+
+def _train_faster_rcnn_phase(
+    phase: Literal[1, 2, 3, 4],
     *,
-    phase1_ckpt: str,
-    output_dir: str | PathLike,
     loader_train: DataLoader,
-    loader_val: DataLoader,
-    loader_test: DataLoader,
-    lr: float = 5e-5,
+    output_dir: str | PathLike,
+    prev_ckpt: Optional[str] = None,
+    num_classes: Optional[int] = None,
+    loader_val: Optional[DataLoader] = None,
+    loader_test: Optional[DataLoader] = None,
+    lr: float = 1e-4,
     max_epochs: int = 10,
     accelerator: Literal['cpu', 'gpu'] = 'cpu',
-    log_every_n_steps: int = 10
+    log_every_n_steps: int = 10,
+    patience: int = 5,
 ) -> str:
-    output_dir = Path(output_dir)
+    """Train a Faster RCNN phase.
     
-    model: LitFasterRCNN = LitFasterRCNN.load_from_checkpoint(
-        phase1_ckpt, lr=lr, phase=2
+    `num_classes` is used only for phase 1.
+    `ckpt` is used for phases 2, 3 and 4.
+    `loader_val` and `loader_test` are used only for phases 2 and 4.
+    """        
+    
+    print(f'Training Faster R-CNN Phase {phase}')
+    
+    # Model loading
+    model: LitFasterRCNN
+    
+    match phase:
+        case 1:
+            assert num_classes is not None
+            model = LitFasterRCNN(num_classes=num_classes, lr=lr, phase=phase)
+        case 2 | 3 | 4:
+            assert prev_ckpt is not None
+            model = LitFasterRCNN.load_from_checkpoint(
+                prev_ckpt, lr=lr, phase=phase-1, 
+            )
+            if phase == 2:
+                model.model.backbone = get_resnet50_fpn_backbone()
+        
+    # Model Training
+    default_root_dir = str(Path(output_dir, f'phase{phase}'))
+    
+    match phase:
+        case 1 | 3:
+            trainer = pl.Trainer(
+                default_root_dir=default_root_dir,
+                callbacks=[
+                    ModelCheckpoint(
+                        monitor='train_loss_sum', mode='min', save_weights_only=True
+                    ),
+                ],
+                max_epochs=max_epochs,
+                accelerator=accelerator,
+                log_every_n_steps=log_every_n_steps,
+            )
+            trainer.fit(model, loader_train)
+        case 2 | 4:
+            assert loader_train is not None and loader_val is not None
+            trainer = pl.Trainer(
+                default_root_dir=default_root_dir,
+                callbacks=[
+                    EarlyStopping(monitor='val_map', mode='max', patience=patience),
+                    ModelCheckpoint(
+                        monitor='val_map', mode='max', save_weights_only=True
+                    ),
+                ],
+                max_epochs=max_epochs,
+                accelerator=accelerator,
+                log_every_n_steps=log_every_n_steps,
+            )
+            trainer.fit(model, loader_train, loader_val)
+            trainer.test(ckpt_path='best', dataloaders=loader_test)
+            
+    new_ckpt: str = trainer.checkpoint_callback.best_model_path  # type: ignore
+    return new_ckpt
+
+
+def train_faster_rcnn(dataset_train, dataset_val, dataset_test, accelerator):
+    faster_rcnn_dir = output_dir / 'faster_rcnn'
+    num_classes = 1 + len(dataset_train.class_names)  # Including background
+    loader_train, loader_test, loader_val = create_dataloaders(
+        dataset_train,
+        dataset_val,
+        dataset_test,
+        batch_size=8,
+        collate_fn=transpose,
+        num_workers=2
     )
-    model.model.backbone = get_resnet50_fpn_backbone()
     
-    trainer = pl.Trainer(
-        default_root_dir=str(output_dir / 'phase2'),
-        callbacks=[
-            EarlyStopping(monitor='val_map', mode='max', patience=3),
-            ModelCheckpoint(monitor='val_map', mode='max', save_weights_only=True),
-        ],
-        max_epochs=max_epochs,
+    ckpt1 = _train_faster_rcnn_phase(
+        phase=1,
+        output_dir=faster_rcnn_dir,
+        loader_train=loader_train,
+        num_classes=num_classes,
         accelerator=accelerator,
-        log_every_n_steps=log_every_n_steps,
+        lr=5e-5,
+        max_epochs=10,
     )
-    trainer.fit(model, loader_train, loader_val)
-    trainer.test(ckpt_path='best', dataloaders=loader_test)
-    
-    ckpt: str = trainer.checkpoint_callback.best_model_path  # type: ignore
-    return ckpt
-    
+    ckpt2 = _train_faster_rcnn_phase(
+        phase=2,
+        output_dir=faster_rcnn_dir,
+        prev_ckpt=ckpt1,
+        loader_train=loader_train,
+        loader_val=loader_val,
+        loader_test=loader_test,
+        accelerator=accelerator,
+        lr=5e-5,
+        max_epochs=10,
+    )
+    ckpt3 = _train_faster_rcnn_phase(
+        phase=3,
+        output_dir=faster_rcnn_dir,
+        prev_ckpt=ckpt2,
+        loader_train=loader_train,
+        accelerator=accelerator,
+        lr=1e-4,
+        max_epochs=10,
+    )
+    ckpt4 = _train_faster_rcnn_phase(
+        phase=4,
+        output_dir=faster_rcnn_dir,
+        prev_ckpt=ckpt3,
+        loader_train=loader_train,
+        loader_val=loader_val,
+        loader_test=loader_test,
+        accelerator=accelerator,
+        lr=1e-3,
+        max_epochs=100,
+    )
+    return ckpt4
 
 # Setup
-data_dir = Path('data_small')
+pl.seed_everything(42)
+data_dir = Path('data')
 output_dir = Path('output')
-faster_rcnn_dir = output_dir / 'faster_rcnn'
-retinanet_dir = output_dir / 'retinanet'
+# retinanet_dir = output_dir / 'retinanet'
 
 dataset_train = ObjectsDataset(data_dir, mode='train')
 dataset_val = ObjectsDataset(data_dir, mode='val')
 dataset_test = ObjectsDataset(data_dir, mode='test')
-num_classes = 1 + len(dataset_train.class_names)  # Including background
-
-
-# --- Faster RCNN ---
-loader_train, loader_test, loader_val = create_dataloaders(
-    dataset_train, dataset_val, dataset_test, batch_size=4, collate_fn=transpose, num_workers=2
-)
 accelerator = 'gpu' if torch.cuda.is_available() else 'cpu'
 
-phase1_ckpt = train_phase1(
-    output_dir=faster_rcnn_dir,
-    loader_train=loader_train,
-    num_classes=num_classes,
-    accelerator=accelerator,
-    max_epochs=2,
+faster_rcnn_ckpt = train_faster_rcnn(
+    dataset_train, dataset_val, dataset_test, accelerator
 )
-phase2_ckpt = train_phase2(
-    phase1_ckpt=phase1_ckpt,
-    output_dir=faster_rcnn_dir,
-    loader_train=loader_train,
-    loader_val=loader_val,
-    loader_test=loader_test,
-    accelerator=accelerator,
-    max_epochs=2,
-)
-
-
-
-
-
-
 
 # %%
