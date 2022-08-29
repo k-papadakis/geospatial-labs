@@ -1,31 +1,20 @@
 # %%
-import functools
 import itertools
-from collections import OrderedDict
-from operator import itemgetter
 from os import PathLike
 from pathlib import Path
-import re
-from typing import (
-    Any, Callable, List, Literal, Optional, Tuple, Dict, TypeVar, TypedDict
-)
+from typing import (Callable, List, Literal, Optional, Tuple, TypedDict)
 
-from tqdm import tqdm
 import numpy as np
 import torch
-from torch import nn
 from torch import Tensor
 from torch.optim import Adam, Optimizer
 from torch.utils.data import Dataset, DataLoader
 from torchvision.transforms.functional import convert_image_dtype
-from torchvision.models.detection import (
-    FasterRCNN, fasterrcnn_resnet50_fpn, FasterRCNN_ResNet50_FPN_Weights
-)
+from torchvision.models.detection import FasterRCNN
 from torchvision.models import ResNet50_Weights
 from torchvision.models.detection.backbone_utils import (
     resnet_fpn_backbone, BackboneWithFPN
 )
-from torchvision.models.detection.image_list import ImageList
 from torchvision.io import read_image, ImageReadMode
 import pytorch_lightning as pl
 from pytorch_lightning.callbacks import EarlyStopping, ModelCheckpoint
@@ -35,10 +24,6 @@ from pytorch_lightning.callbacks import EarlyStopping, ModelCheckpoint
 # otherwise MeanAveragePrecision might not work.
 # See this https://github.com/Lightning-AI/metrics/issues/1147
 from torchmetrics.detection.mean_ap import MeanAveragePrecision
-
-
-class EmptyDict(TypedDict):
-    pass
 
 
 class TargetsDict(TypedDict):
@@ -175,7 +160,7 @@ class LitFasterRCNN(pl.LightningModule):
         images: List[Tensor],
         targets: Optional[List[TargetsDict]] = None
     ) -> List[DetectionsDict] | LossesDict:
-        """Return losses if training else return detections."""
+        """Returns losses if training else returns detections."""
         return self.model(images, targets)
 
     def training_step(
@@ -188,20 +173,22 @@ class LitFasterRCNN(pl.LightningModule):
             case 1 | 3:
                 a, b = 'loss_objectness', 'loss_rpn_box_reg'
                 loss_sum = losses[a] + losses[b]
-                self.log_dict(
-                    {f'train_{k}': losses[k] for k in (a, b)}
-                    | {'train_loss_sum': loss_sum},
-                    batch_size=len(images)
-                )
+                d = {
+                    f'train_{k}': losses[k] for k in (a, b)
+                } | {
+                    'train_loss_sum': loss_sum
+                }
+                self.log_dict(d, batch_size=len(images))
                 return loss_sum
             case 2 | 4:
                 a, b = 'loss_classifier', 'loss_box_reg'
                 loss_sum = losses[a] + losses[b]
-                self.log_dict(
-                    {f'train_{k}': losses[k] for k in (a, b)} 
-                    | {'train_loss_sum': loss_sum},
-                    batch_size=len(images)
-                )
+                d = {
+                    f'train_{k}': losses[k] for k in (a, b)
+                } | {
+                    'train_loss_sum': loss_sum
+                }
+                self.log_dict(d, batch_size=len(images))
                 return loss_sum
             case _:
                 raise ValueError(f'Invalid phase value {self.phase}')
@@ -243,23 +230,23 @@ class LitFasterRCNN(pl.LightningModule):
 
     def validation_epoch_end(self, outputs):
         metrics = self.val_mean_ap.compute()
-        self.log_dict(
-            {f'val_{k}': v for k, v in metrics.items()}
-        )
+        self.log_dict({f'val_{k}': v for k, v in metrics.items()})
         self.val_mean_ap.reset()
 
     def test_epoch_end(self, outputs):
         metrics = self.test_mean_ap.compute()
-        
+
         map_per_class = metrics.pop('map_per_class')
         mar_100_per_class = metrics.pop('mar_100_per_class')
-        
-        metrics |= {f'map_class_{i}': x for i, x in enumerate(map_per_class)}
-        metrics |= {f'mar_100_class_{i}': x for i, x in enumerate(mar_100_per_class)}
-        
-        self.log_dict(
-            {f'test_{k}': v for k, v in metrics.items()}
+
+        metrics.update(
+            (f'map_class_{i}', x) for i, x in enumerate(map_per_class)
         )
+        metrics.update(
+            (f'mar_100_class_{i}', x) for i, x in enumerate(mar_100_per_class)
+        )
+
+        self.log_dict({f'test_{k}': v for k, v in metrics.items()})
         self.test_mean_ap.reset()
 
 
@@ -283,13 +270,13 @@ def _train_faster_rcnn_phase(
     `num_classes` is used only for phase 1.
     `ckpt` is used for phases 2, 3 and 4.
     `loader_val` and `loader_test` are used only for phases 2 and 4.
-    """        
-    
+    """
+
     print(f'Training Faster R-CNN Phase {phase}')
-    
+
     # Model loading
     model: LitFasterRCNN
-    
+
     match phase:
         case 1:
             assert num_classes is not None
@@ -297,21 +284,23 @@ def _train_faster_rcnn_phase(
         case 2 | 3 | 4:
             assert prev_ckpt is not None
             model = LitFasterRCNN.load_from_checkpoint(
-                prev_ckpt, lr=lr, phase=phase-1, 
+                prev_ckpt, lr=lr, phase=phase-1,
             )
             if phase == 2:
                 model.model.backbone = get_resnet50_fpn_backbone()
-        
+
     # Model Training
     default_root_dir = str(Path(output_dir, f'phase{phase}'))
-    
+
     match phase:
         case 1 | 3:
             trainer = pl.Trainer(
                 default_root_dir=default_root_dir,
                 callbacks=[
                     ModelCheckpoint(
-                        monitor='train_loss_sum', mode='min', save_weights_only=True
+                        monitor='train_loss_sum',
+                        mode='min',
+                        save_weights_only=True
                     ),
                 ],
                 max_epochs=max_epochs,
@@ -324,7 +313,9 @@ def _train_faster_rcnn_phase(
             trainer = pl.Trainer(
                 default_root_dir=default_root_dir,
                 callbacks=[
-                    EarlyStopping(monitor='val_map', mode='max', patience=patience),
+                    EarlyStopping(
+                        monitor='val_map', mode='max', patience=patience
+                    ),
                     ModelCheckpoint(
                         monitor='val_map', mode='max', save_weights_only=True
                     ),
@@ -335,12 +326,15 @@ def _train_faster_rcnn_phase(
             )
             trainer.fit(model, loader_train, loader_val)
             trainer.test(ckpt_path='best', dataloaders=loader_test)
-            
+
     new_ckpt: str = trainer.checkpoint_callback.best_model_path  # type: ignore
     return new_ckpt
 
 
-def train_faster_rcnn(dataset_train, dataset_val, dataset_test, accelerator):
+def train_faster_rcnn(
+    dataset_train: ObjectsDataset, dataset_val: ObjectsDataset,
+    dataset_test: ObjectsDataset, accelerator: Literal['cpu', 'gpu']
+):
     faster_rcnn_dir = output_dir / 'faster_rcnn'
     num_classes = 1 + len(dataset_train.class_names)  # Including background
     loader_train, loader_test, loader_val = create_dataloaders(
@@ -351,7 +345,7 @@ def train_faster_rcnn(dataset_train, dataset_val, dataset_test, accelerator):
         collate_fn=transpose,
         num_workers=2
     )
-    
+
     ckpt1 = _train_faster_rcnn_phase(
         phase=1,
         output_dir=faster_rcnn_dir,
@@ -393,6 +387,7 @@ def train_faster_rcnn(dataset_train, dataset_val, dataset_test, accelerator):
         max_epochs=100,
     )
     return ckpt4
+
 
 # Setup
 pl.seed_everything(42)
