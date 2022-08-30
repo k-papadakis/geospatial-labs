@@ -473,7 +473,7 @@ def _train_faster_rcnn_phase(
     
     `num_classes` is used only for phase 1.
     `ckpt` is used for phases 2, 3 and 4.
-    `loader_val` and `loader_test` are used only for phase and 4.
+    `loader_val` and `loader_test` are used only for phase 4.
     
     Returns the path to the best model checkpoint saved during training.
     """
@@ -628,7 +628,6 @@ def main():
     data_dir = Path('data')
     output_dir = Path('output')
     accelerator = 'gpu' if torch.cuda.is_available() else 'cpu'
-    dataset = ObjectsDataset(data_dir, 'train')
 
     faster_rcnn_ckpt = train_faster_rcnn(
     data_dir, output_dir, batch_size=8, accelerator=accelerator, num_workers=2
