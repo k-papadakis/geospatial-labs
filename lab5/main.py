@@ -180,7 +180,7 @@ class LitFasterRCNN(pl.LightningModule):
         Model forward
             - Phases 1 and 3: Returns the proposal losses if training, else returns the proposals.
               The combined loss is the sum of the proposal losses.
-            - Phases 3 and 4: Returns the detection losses if training else returns the detections.
+            - Phases 2 and 4: Returns the detection losses if training else returns the detections.
               The combined loss is the sum of the detection losses.
         
         Model training (see also `train_faster_rcnn`)
