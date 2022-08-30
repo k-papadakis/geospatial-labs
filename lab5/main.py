@@ -2,7 +2,8 @@
 import itertools
 from os import PathLike
 from pathlib import Path
-from typing import (Callable, List, Literal, Optional, Tuple, TypedDict)
+from typing import (Callable, Dict, List, Literal, Optional, Tuple, TypedDict, Union)
+from collections.abc import Sequence
 
 import numpy as np
 import torch
@@ -15,9 +16,15 @@ from torchvision.models import ResNet50_Weights
 from torchvision.models.detection.backbone_utils import (
     resnet_fpn_backbone, BackboneWithFPN
 )
+from torchvision.models.detection.transform import (
+    GeneralizedRCNNTransform, ImageList
+)
+from torchvision.models.detection.roi_heads import RoIHeads
+from torchvision.models.detection.rpn import RegionProposalNetwork
 from torchvision.io import read_image, ImageReadMode
 import pytorch_lightning as pl
 from pytorch_lightning.callbacks import EarlyStopping, ModelCheckpoint
+from tqdm import tqdm
 
 # IMPORTANT: Install torchmetrics via
 # pip install -e git+https://github.com/k-papadakis/metrics.git#egg=torchmetrics
@@ -26,12 +33,26 @@ from pytorch_lightning.callbacks import EarlyStopping, ModelCheckpoint
 from torchmetrics.detection.mean_ap import MeanAveragePrecision
 
 
+class EmptyDict(TypedDict):
+    pass
+    
+
 class TargetsDict(TypedDict):
     labels: Tensor
     boxes: Tensor
 
 
-class LossesDict(TypedDict):
+class RPNLossesDict(TypedDict):
+    loss_objectness: Tensor
+    loss_rpn_box_reg: Tensor
+    
+
+class DetectorLossesDict(TypedDict):
+    loss_classifier: Tensor
+    loss_box_reg: Tensor
+    
+    
+class AllLossesDict(TypedDict):
     # RPN losses
     loss_objectness: Tensor
     loss_rpn_box_reg: Tensor
@@ -61,7 +82,7 @@ class ObjectsDataset(Dataset):
             'battery', 'dice', 'toycar', 'candle', 'highlighter', 'spoon'
         ]
         self.class_name_to_int = {
-            name: i for i, name in enumerate(self.class_names)
+            name: i for i, name in enumerate(self.class_names, 1)
         }
 
     def __len__(self) -> int:
@@ -154,45 +175,81 @@ class LitFasterRCNN(pl.LightningModule):
         self.model = FasterRCNN(backbone, num_classes)
         self.val_mean_ap = MeanAveragePrecision()
         self.test_mean_ap = MeanAveragePrecision(class_metrics=True)
+        
+        match self.phase:
+            case 1:
+                self.model.roi_heads.requires_grad_(False)
+            case 2:
+                self.model.rpn.requires_grad_(False)  # Not used in forward.
+            case 3:
+                self.model.backbone.requires_grad_(False)
+                self.model.roi_heads.requires_grad_(False)
+            case 4:
+                self.model.backbone.requires_grad_(False)
+                self.model.rpn.requires_grad_(False)  # Not used in forward.
+            case _:
+                raise ValueError(f'Invalid phase value {self.phase}')
+        
 
     def forward(
         self,
         images: List[Tensor],
-        targets: Optional[List[TargetsDict]] = None
-    ) -> List[DetectionsDict] | LossesDict:
-        """Returns losses if training else returns detections."""
-        return self.model(images, targets)
-
-    def training_step(
-        self, batch: Tuple[List[Tensor], List[TargetsDict]], batch_idx: int
-    ) -> Tensor:
-        images, targets = batch
-        losses: LossesDict = self.model(images, targets)
-
+        targets: Optional[List[TargetsDict]] = None,
+        cached_proposals: Optional[List[Tensor]] = None,
+    ) -> RPNLossesDict | AllLossesDict | List[Tensor] | List[DetectionsDict]:
+        """See torchvision.models.detection.generalized_rcnn.GeneralizedRCNN"""
+        image_list: ImageList
+        original_image_sizes: List[Tuple[int, int]]
+        features: Dict[str, Tensor]
+        proposals: List[Tensor]
+        detections: List[DetectionsDict]
+        proposal_losses: RPNLossesDict | EmptyDict  # Empty if not training.
+        detector_losses: DetectorLossesDict 
+        
+        transform: GeneralizedRCNNTransform = self.model.transform  # type: ignore
+        backbone: BackboneWithFPN = self.model.backbone  # type: ignore
+        rpn: RegionProposalNetwork = self.model.rpn  # type: ignore
+        roi_heads: RoIHeads = self.model.roi_heads  # type: ignore
+        
+        # Forward
+        image_list, targets = transform(images, targets)
+        features = backbone(image_list.tensors)
+        
         match self.phase:
-            case 1 | 3:
-                a, b = 'loss_objectness', 'loss_rpn_box_reg'
-                loss_sum = losses[a] + losses[b]
-                d = {
-                    f'train_{k}': losses[k] for k in (a, b)
-                } | {
-                    'train_loss_sum': loss_sum
-                }
-                self.log_dict(d, batch_size=len(images))
-                return loss_sum
-            case 2 | 4:
-                a, b = 'loss_classifier', 'loss_box_reg'
-                loss_sum = losses[a] + losses[b]
-                d = {
-                    f'train_{k}': losses[k] for k in (a, b)
-                } | {
-                    'train_loss_sum': loss_sum
-                }
-                self.log_dict(d, batch_size=len(images))
-                return loss_sum
+            case 1 | 3 | 4:
+                proposals, proposal_losses = rpn(image_list, features, targets)
+            case 2:
+                assert cached_proposals is not None
+                proposals = cached_proposals
             case _:
                 raise ValueError(f'Invalid phase value {self.phase}')
-
+        
+        match self.phase:
+            case 1 | 3:
+                pass
+            case 2 | 4:
+                detections, detector_losses = roi_heads(
+                    features, proposals, image_list.image_sizes, targets
+                )
+            case _:
+                raise ValueError(f'Invalid phase value {self.phase}')
+            
+        match self.phase, self.training:
+            case (1 | 3), True:
+                return proposal_losses  # type: ignore
+            case (2 | 4), True:
+                return detector_losses  # type: ignore
+            case (1 | 3), False:
+                return proposals  # type: ignore
+            case (2 | 4), False:
+                original_image_sizes = [tuple(img.shape[-2:]) for img in images]
+                detections = transform.postprocess(
+                    detections, image_list.image_sizes, original_image_sizes  # type: ignore
+                )
+                return detections
+            case _:
+                raise ValueError('Invalid (phase, training) combination {self.phase}, {self.training}')
+            
     def configure_optimizers(self) -> Optimizer:
         model = self.model
 
@@ -214,26 +271,90 @@ class LitFasterRCNN(pl.LightningModule):
 
         return Adam(params, lr=self.lr)
 
+    def training_step(
+        self,
+        batch: Union[
+            Tuple[List[Tensor], List[TargetsDict]],
+            Tuple[List[Tensor], List[TargetsDict], List[Tensor]]
+        ],
+        batch_idx: int,
+    ) -> Tensor:
+        losses: RPNLossesDict | AllLossesDict
+        
+        match self.phase:
+            case 1 | 3 | 4:
+                assert len(batch) == 2
+                images, targets = batch
+                losses = self(images, targets)
+            case 2:
+                assert len(batch) == 3
+                images, targets, cached_proposals = batch
+                losses = self(images, targets, cached_proposals)
+            case _:
+                raise ValueError(f'Invalid phase value {self.phase}')
+        
+        loss = sum(losses.values())  # type: ignore  # TODO: Weird warning.
+        d = {f'train_{k}': v for k, v in losses.items()} | {'train_loss': loss}
+        self.log_dict(d)  # type: ignore
+        
+        return loss
+    
+    def _shared_val_test_step(
+        self,
+        batch: Union[
+            Tuple[List[Tensor], List[TargetsDict]],
+            Tuple[List[Tensor], List[TargetsDict], List[Tensor]]
+        ],
+    ) -> Tuple[List[DetectionsDict], List[TargetsDict]]:
+        detections: List[DetectionsDict]
+        
+        match self.phase:
+            case 1 | 3:
+                raise ValueError(
+                    f'No validation or test step step for phase {self.phase}'
+                )
+            case 4:
+                assert len(batch) == 2 
+                images, targets = batch
+                detections = self(images)
+            case 2:
+                assert len(batch) == 3
+                images, targets, cached_proposals = batch
+                detections = self(images, cached_proposals=cached_proposals)
+            case _:
+                raise ValueError(f'Invalid phase value {self.phase}')
+        
+        return detections, targets
+        
+
     def validation_step(
-        self, batch: Tuple[List[Tensor], List[TargetsDict]], batch_idx: int
+        self,
+        batch: Union[
+            Tuple[List[Tensor], List[TargetsDict]],
+            Tuple[List[Tensor], List[TargetsDict], List[Tensor]]
+        ],
+        batch_idx: int,
     ) -> None:
-        images, targets = batch
-        detections: DetectionsDict = self(images)
+        detections, targets = self._shared_val_test_step(batch)
         self.val_mean_ap.update(detections, targets)  # type: ignore
-
+                
     def test_step(
-        self, batch: Tuple[List[Tensor], List[TargetsDict]], batch_idx: int
+        self,
+        batch: Union[
+            Tuple[List[Tensor], List[TargetsDict]],
+            Tuple[List[Tensor], List[TargetsDict], List[Tensor]]
+        ],
+        batch_idx: int
     ) -> None:
-        images, targets = batch
-        detections: DetectionsDict = self(images)
+        detections, targets = self._shared_val_test_step(batch)
         self.test_mean_ap.update(detections, targets)  # type: ignore
-
-    def validation_epoch_end(self, outputs):
+        
+    def validation_epoch_end(self, outputs) -> None:
         metrics = self.val_mean_ap.compute()
         self.log_dict({f'val_{k}': v for k, v in metrics.items()})
         self.val_mean_ap.reset()
 
-    def test_epoch_end(self, outputs):
+    def test_epoch_end(self, outputs) -> None:
         metrics = self.test_mean_ap.compute()
 
         map_per_class = metrics.pop('map_per_class')
@@ -248,8 +369,70 @@ class LitFasterRCNN(pl.LightningModule):
 
         self.log_dict({f'test_{k}': v for k, v in metrics.items()})
         self.test_mean_ap.reset()
+    
+    
+def cache_phase1_proposals(
+    ckpt: str,
+    dataset: ObjectsDataset,
+    cache_dir: str | PathLike,
+    accelerator: Literal['cpu', 'gpu'] = 'cpu',
+    batch_size=8,
+) -> None:
+    images: List[Tensor]
+    proposals: List[Tensor]
+    
+    model: LitFasterRCNN
+    model = LitFasterRCNN.load_from_checkpoint(ckpt)
+    if model.phase != 1:
+        raise ValueError(f'Model phase = {model.phase} != 1')
+    
+    print('Caching Phase 1')
+    
+    cache_dir = Path(cache_dir)
+    cache_dir.mkdir(exist_ok=True, parents=True)
+    loader = DataLoader(
+        dataset, batch_size=batch_size, shuffle=False, collate_fn=transpose
+    )
+    device = torch.device(accelerator if accelerator != 'gpu' else 'cuda')
 
+    was_training = model.training
+    model.train(False)
+    model.to(device)
 
+    # Caching
+    names = iter(dataset.image_names)
+    for images, _ in tqdm(loader):
+        images = [img.to(device) for img in images]
+        with torch.inference_mode():
+            proposals = model(images)
+        for proposal in proposals:
+            torch.save(proposal.cpu(), cache_dir / f'{next(names)}.pt')
+
+    model.train(was_training)
+    
+    
+class Phase2Dataset(ObjectsDataset):
+
+    def __init__(
+        self, root_dir: str | PathLike, mode: Literal['train', 'val', 'test'],
+        proposals_dir: str | PathLike
+    ) -> None:
+        super().__init__(root_dir, mode)
+        self.proposals_dir = Path(proposals_dir)
+        
+        names = sorted(p.stem for p in self.proposals_dir.iterdir())
+        if names != self.image_names:
+            raise ValueError('Non matching proposal and image names.')
+
+    def __getitem__(self, idx) -> Tuple[Tensor, TargetsDict, Tensor]:
+        image, targets = super().__getitem__(idx)
+        proposals = torch.load(
+            self.proposals_dir / f'{self.image_names[idx]}.pt'
+        )
+        return image, targets, proposals
+
+    
+# %%
 def _train_faster_rcnn_phase(
     phase: Literal[1, 2, 3, 4],
     *,
@@ -284,7 +467,7 @@ def _train_faster_rcnn_phase(
         case 2 | 3 | 4:
             assert prev_ckpt is not None
             model = LitFasterRCNN.load_from_checkpoint(
-                prev_ckpt, lr=lr, phase=phase-1,
+                prev_ckpt, lr=lr, phase=phase,
             )
             if phase == 2:
                 model.model.backbone = get_resnet50_fpn_backbone()
@@ -293,12 +476,12 @@ def _train_faster_rcnn_phase(
     default_root_dir = str(Path(output_dir, f'phase{phase}'))
 
     match phase:
-        case 1 | 3:
+        case 1 | 2 | 3:
             trainer = pl.Trainer(
                 default_root_dir=default_root_dir,
                 callbacks=[
                     ModelCheckpoint(
-                        monitor='train_loss_sum',
+                        monitor='train_loss',
                         mode='min',
                         save_weights_only=True
                     ),
@@ -308,7 +491,7 @@ def _train_faster_rcnn_phase(
                 log_every_n_steps=log_every_n_steps,
             )
             trainer.fit(model, loader_train)
-        case 2 | 4:
+        case 4:
             assert loader_train is not None and loader_val is not None
             trainer = pl.Trainer(
                 default_root_dir=default_root_dir,
@@ -332,59 +515,79 @@ def _train_faster_rcnn_phase(
 
 
 def train_faster_rcnn(
-    dataset_train: ObjectsDataset, dataset_val: ObjectsDataset,
-    dataset_test: ObjectsDataset, accelerator: Literal['cpu', 'gpu']
-):
-    faster_rcnn_dir = output_dir / 'faster_rcnn'
-    num_classes = 1 + len(dataset_train.class_names)  # Including background
-    loader_train, loader_test, loader_val = create_dataloaders(
-        dataset_train,
-        dataset_val,
-        dataset_test,
-        batch_size=8,
+    data_dir: str | PathLike,
+    output_dir: str | PathLike,
+    batch_size: int,
+    accelerator: Literal['cpu', 'gpu'],
+    num_workers: int,
+):  
+    dataset_train_p134 = ObjectsDataset(data_dir, mode='train')
+    dataset_val_p134 = ObjectsDataset(data_dir, mode='val')
+    dataset_test_p134 = ObjectsDataset(data_dir, mode='test')
+    loader_train_p134, loader_test_p134, loader_val_p134 = create_dataloaders(
+        dataset_train_p134,
+        dataset_val_p134,
+        dataset_test_p134,
+        batch_size=batch_size,
         collate_fn=transpose,
-        num_workers=2
+        num_workers=num_workers,
     )
+    faster_rcnn_dir = Path(output_dir, 'faster_rcnn')
+    num_classes = 1 + len(dataset_train_p134.class_names)  # Including background
 
     ckpt1 = _train_faster_rcnn_phase(
         phase=1,
         output_dir=faster_rcnn_dir,
-        loader_train=loader_train,
+        loader_train=loader_train_p134,
         num_classes=num_classes,
         accelerator=accelerator,
         lr=5e-5,
-        max_epochs=10,
+        max_epochs=2,
     )
+    
+    proposals_dir = Path(ckpt1).parent.parent.parent.parent / 'proposals_cache'
+    cache_phase1_proposals(
+        ckpt1, dataset_train_p134, proposals_dir,
+        accelerator=accelerator, batch_size=batch_size
+    )
+    dataset_train_p2 = Phase2Dataset(
+        data_dir, mode='train', proposals_dir=proposals_dir
+    )
+    loader_train_p2 = DataLoader(
+        dataset_train_p2,
+        batch_size=batch_size,
+        collate_fn=transpose,
+        num_workers=num_workers
+    )
+    
     ckpt2 = _train_faster_rcnn_phase(
         phase=2,
         output_dir=faster_rcnn_dir,
         prev_ckpt=ckpt1,
-        loader_train=loader_train,
-        loader_val=loader_val,
-        loader_test=loader_test,
+        loader_train=loader_train_p2,
         accelerator=accelerator,
         lr=5e-5,
-        max_epochs=10,
+        max_epochs=2,
     )
     ckpt3 = _train_faster_rcnn_phase(
         phase=3,
         output_dir=faster_rcnn_dir,
         prev_ckpt=ckpt2,
-        loader_train=loader_train,
+        loader_train=loader_train_p134,
         accelerator=accelerator,
         lr=1e-4,
-        max_epochs=10,
+        max_epochs=2,
     )
     ckpt4 = _train_faster_rcnn_phase(
         phase=4,
         output_dir=faster_rcnn_dir,
         prev_ckpt=ckpt3,
-        loader_train=loader_train,
-        loader_val=loader_val,
-        loader_test=loader_test,
+        loader_train=loader_train_p134,
+        loader_val=loader_val_p134,
+        loader_test=loader_test_p134,
         accelerator=accelerator,
         lr=1e-3,
-        max_epochs=100,
+        max_epochs=2,
     )
     return ckpt4
 
@@ -394,14 +597,11 @@ pl.seed_everything(42)
 data_dir = Path('data')
 output_dir = Path('output')
 # retinanet_dir = output_dir / 'retinanet'
-
-dataset_train = ObjectsDataset(data_dir, mode='train')
-dataset_val = ObjectsDataset(data_dir, mode='val')
-dataset_test = ObjectsDataset(data_dir, mode='test')
 accelerator = 'gpu' if torch.cuda.is_available() else 'cpu'
+dataset = ObjectsDataset(data_dir, 'train')
 
 faster_rcnn_ckpt = train_faster_rcnn(
-    dataset_train, dataset_val, dataset_test, accelerator
+    data_dir, output_dir, batch_size=8, accelerator=accelerator, num_workers=2
 )
 
 # %%
