@@ -473,7 +473,7 @@ def _train_faster_rcnn_phase(
     
     `num_classes` is used only for phase 1.
     `ckpt` is used for phases 2, 3 and 4.
-    `loader_val` and `loader_test` are used only for phases 2 and 4.
+    `loader_val` and `loader_test` are used only for phase and 4.
     
     Returns the path to the best model checkpoint saved during training.
     """
