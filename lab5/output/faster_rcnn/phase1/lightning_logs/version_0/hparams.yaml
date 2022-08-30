@@ -1,0 +1,3 @@
+lr: 5.0e-05
+num_classes: 7
+phase: 1

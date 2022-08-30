@@ -154,7 +154,7 @@ def get_resnet50_fpn_backbone() -> BackboneWithFPN:
     return resnet_fpn_backbone(
         backbone_name='resnet50',
         weights=ResNet50_Weights.DEFAULT,
-        trainable_layers=2
+        trainable_layers=3
     )
 
 
@@ -178,15 +178,15 @@ class LitFasterRCNN(pl.LightningModule):
         
         match self.phase:
             case 1:
-                self.model.roi_heads.requires_grad_(False)
+                self.model.roi_heads.requires_grad_(False)  # Not used
             case 2:
-                self.model.rpn.requires_grad_(False)  # Not used in forward.
+                self.model.rpn.requires_grad_(False)  # Not used
             case 3:
                 self.model.backbone.requires_grad_(False)
-                self.model.roi_heads.requires_grad_(False)
+                self.model.roi_heads.requires_grad_(False)  # Not used
             case 4:
                 self.model.backbone.requires_grad_(False)
-                self.model.rpn.requires_grad_(False)  # Not used in forward.
+                self.model.rpn.requires_grad_(False)  # Not used
             case _:
                 raise ValueError(f'Invalid phase value {self.phase}')
         
@@ -386,7 +386,7 @@ def cache_phase1_proposals(
     if model.phase != 1:
         raise ValueError(f'Model phase = {model.phase} != 1')
     
-    print('Caching Phase 1')
+    print('Caching Phase 1 Proposals')
     
     cache_dir = Path(cache_dir)
     cache_dir.mkdir(exist_ok=True, parents=True)
@@ -542,10 +542,10 @@ def train_faster_rcnn(
         num_classes=num_classes,
         accelerator=accelerator,
         lr=5e-5,
-        max_epochs=2,
+        max_epochs=10,
     )
     
-    proposals_dir = Path(ckpt1).parent.parent.parent.parent / 'proposals_cache'
+    proposals_dir = Path(ckpt1).parent.parent / 'proposals_cache'
     cache_phase1_proposals(
         ckpt1, dataset_train_p134, proposals_dir,
         accelerator=accelerator, batch_size=batch_size
@@ -567,7 +567,7 @@ def train_faster_rcnn(
         loader_train=loader_train_p2,
         accelerator=accelerator,
         lr=5e-5,
-        max_epochs=2,
+        max_epochs=10,
     )
     ckpt3 = _train_faster_rcnn_phase(
         phase=3,
@@ -576,7 +576,7 @@ def train_faster_rcnn(
         loader_train=loader_train_p134,
         accelerator=accelerator,
         lr=1e-4,
-        max_epochs=2,
+        max_epochs=10,
     )
     ckpt4 = _train_faster_rcnn_phase(
         phase=4,
@@ -587,7 +587,7 @@ def train_faster_rcnn(
         loader_test=loader_test_p134,
         accelerator=accelerator,
         lr=1e-3,
-        max_epochs=2,
+        max_epochs=100,
     )
     return ckpt4
 

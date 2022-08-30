@@ -1,7 +1,7 @@
 env
 *.tif
 *.pt
-lightning_logs/
+*.ckpt
 data/
 data_small/
 .vscode
