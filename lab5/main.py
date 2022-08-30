@@ -361,10 +361,10 @@ class LitFasterRCNN(pl.LightningModule):
         mar_100_per_class = metrics.pop('mar_100_per_class')
 
         metrics.update(
-            (f'map_class_{i}', x) for i, x in enumerate(map_per_class)
+            (f'map_class_{i}', x) for i, x in enumerate(map_per_class, 1)
         )
         metrics.update(
-            (f'mar_100_class_{i}', x) for i, x in enumerate(mar_100_per_class)
+            (f'mar_100_class_{i}', x) for i, x in enumerate(mar_100_per_class, 1)
         )
 
         self.log_dict({f'test_{k}': v for k, v in metrics.items()})
@@ -386,7 +386,7 @@ def cache_phase1_proposals(
     if model.phase != 1:
         raise ValueError(f'Model phase = {model.phase} != 1')
     
-    print('Caching Phase 1 Proposals')
+    print('Caching Faster R-CNN Phase 1 Proposals')
     
     cache_dir = Path(cache_dir)
     cache_dir.mkdir(exist_ok=True, parents=True)
@@ -497,7 +497,7 @@ def _train_faster_rcnn_phase(
                 default_root_dir=default_root_dir,
                 callbacks=[
                     EarlyStopping(
-                        monitor='val_map', mode='max', patience=patience
+                        monitor='val_map', mode='max', patience=patience, verbose=True
                     ),
                     ModelCheckpoint(
                         monitor='val_map', mode='max', save_weights_only=True
@@ -586,8 +586,8 @@ def train_faster_rcnn(
         loader_val=loader_val_p134,
         loader_test=loader_test_p134,
         accelerator=accelerator,
-        lr=1e-3,
-        max_epochs=100,
+        lr=1e-4,
+        max_epochs=30,
     )
     return ckpt4
 
