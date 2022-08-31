@@ -12,7 +12,6 @@ from torch import Tensor
 from torch.optim import Adam, Optimizer
 from torch.utils.data import Dataset, DataLoader
 from torchvision.transforms.functional import convert_image_dtype
-from torchvision.models.detection import FasterRCNN
 from torchvision.models import ResNet50_Weights
 from torchvision.models.detection.backbone_utils import (
     resnet_fpn_backbone, BackboneWithFPN
@@ -23,6 +22,7 @@ from torchvision.models.detection.transform import (
 from torchvision.utils import draw_bounding_boxes
 from torchvision.transforms.functional import convert_image_dtype
 from torch.utils.tensorboard import SummaryWriter  # type: ignore
+from torchvision.models.detection.faster_rcnn import fasterrcnn_resnet50_fpn_v2
 from torchvision.models.detection.roi_heads import RoIHeads
 from torchvision.models.detection.rpn import RegionProposalNetwork
 from torchvision.io import read_image, ImageReadMode
@@ -31,7 +31,7 @@ from pytorch_lightning.callbacks import EarlyStopping, ModelCheckpoint
 from tqdm import tqdm
 
 # IMPORTANT: Install torchmetrics via
-# pip install -e git+https://github.com/k-papadakis/metrics.git#egg=torchmetrics
+# pip install git+https://github.com/k-papadakis/metrics.git#egg=torchmetrics
 # otherwise MeanAveragePrecision might not work.
 # See this https://github.com/Lightning-AI/metrics/issues/1147
 from torchmetrics.detection.mean_ap import MeanAveragePrecision
@@ -70,9 +70,7 @@ ObjectsBatchType = Union[
 
 class ObjectsDataset(Dataset):
     
-    class_names = [
-        'battery', 'dice', 'toycar', 'candle', 'highlighter', 'spoon'
-    ]
+    class_names = ['battery', 'dice', 'toycar', 'candle', 'highlighter', 'spoon']
 
     def __init__(
         self, root_dir: str | PathLike, mode: Literal['train', 'val', 'test']
@@ -216,10 +214,9 @@ class LitFasterRCNN(pl.LightningModule):
             self.class_names = list(map(str, range(1, num_classes)))
         else:
             self.class_names = class_names
-        backbone = get_resnet50_fpn_backbone()
-        self.model = FasterRCNN(backbone, num_classes)
         self.val_mean_ap = MeanAveragePrecision()
         self.test_mean_ap = MeanAveragePrecision(class_metrics=True)
+        self.model = fasterrcnn_resnet50_fpn_v2(num_classes=num_classes)
 
         match self.phase:
             case 1:
@@ -377,9 +374,7 @@ class LitFasterRCNN(pl.LightningModule):
     ) -> None:
         image_names, images, targets, detections = self._shared_val_test_step(batch)
         self.test_mean_ap.update(detections, targets)  # type: ignore
-        self.log_images(
-            images, detections, image_names
-        )
+        self.log_images(images, detections, image_names)
     
     def log_images(
         self,
@@ -390,9 +385,13 @@ class LitFasterRCNN(pl.LightningModule):
         """Log images with boxes and labels to TensorBoard"""
         tensorboard: SummaryWriter = self.logger.experiment  # type: ignore
         for name, img, dt in zip(image_names, images, detections, strict=True):
+            labels = [
+                f'{self.class_names[k - 1]}:{s:.0%}'
+                for k, s in zip(dt['labels'], dt['scores'])
+            ]
             img = draw_bounding_boxes(
                 image=convert_image_dtype(img, torch.uint8),
-                labels=[self.class_names[k - 1] for k in dt['labels']],
+                labels=labels,
                 boxes=dt['boxes'],
             )
             tensorboard.add_image(tag=name, img_tensor=img)
@@ -505,13 +504,15 @@ def _train_faster_rcnn_phase(
             model = LitFasterRCNN(
                 num_classes=num_classes, lr=lr, phase=phase, class_names=class_names
             )
-        case 2 | 3 | 4:
+        case 2:
             assert prev_ckpt is not None
-            model = LitFasterRCNN.load_from_checkpoint(
-                prev_ckpt, lr=lr, phase=phase,
-            )
-            if phase == 2:
-                model.model.backbone = get_resnet50_fpn_backbone()
+            model = LitFasterRCNN.load_from_checkpoint(prev_ckpt, lr=lr, phase=phase)
+            model.model.backbone = fasterrcnn_resnet50_fpn_v2().backbone
+        case 3 | 4:
+            assert prev_ckpt is not None
+            model = LitFasterRCNN.load_from_checkpoint(prev_ckpt, lr=lr, phase=phase)
+        case _:
+            raise ValueError(f'Invalid phase value {phase}')
 
     # Model Training
     default_root_dir = str(Path(output_dir, f'phase_{phase}'))
@@ -533,7 +534,7 @@ def _train_faster_rcnn_phase(
             )
             trainer.fit(model, loader_train)
         case 4:
-            assert loader_train is not None and loader_val is not None
+            assert loader_val is not None and loader_test is not None
             trainer = pl.Trainer(
                 default_root_dir=default_root_dir,
                 callbacks=[
@@ -550,6 +551,8 @@ def _train_faster_rcnn_phase(
             )
             trainer.fit(model, loader_train, loader_val)
             trainer.test(ckpt_path='best', dataloaders=loader_test)
+        case _:
+            raise ValueError(f'Invalid phase value {phase}')
 
     new_ckpt: str = trainer.checkpoint_callback.best_model_path  # type: ignore
     return new_ckpt
