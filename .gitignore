@@ -3,10 +3,8 @@ env
 *.pt
 *.ckpt
 data/
-data_small/
 .vscode
 __pycache__/
-temp.py
 dist/
 *egg-info/
 kaggle/

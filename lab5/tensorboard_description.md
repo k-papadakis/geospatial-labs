@@ -14,6 +14,6 @@ Student ID: 03400149
 
 * `BackboneWithFPN` from `Resnet50` with `trainable_layers=2`
 * `batch_size=8` in all phases
-* `EarlyStopping` during phase 2 and 4, tracking the mAP with `patience=5` and `min_delta=0`
-* `max_epochs=10` for phase 1, 2 and 3, and `30` for phase 4
+* `EarlyStopping` during phase 2 and 4, tracking the mAP with `patience=7` and `min_delta=0`
+* `max_epochs=15` for phase 1, 2 and 3, and `30` for phase 4
 * `lr`: see hparams

@@ -1,0 +1,3 @@
+data_dev
+# This contains images
+output/faster_rcnn/phase_4/lightning_logs/version_*/events.out.tfevents.*.4
