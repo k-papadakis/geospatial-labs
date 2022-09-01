@@ -2,6 +2,7 @@
 import itertools
 from os import PathLike
 from pathlib import Path
+import random
 from typing import (
     Callable, Dict, List, Literal, Optional, Tuple, TypedDict, Union
 )
@@ -11,16 +12,14 @@ import torch
 from torch import Tensor
 from torch.optim import Adam, Optimizer
 from torch.utils.data import Dataset, DataLoader
-from torchvision.transforms.functional import convert_image_dtype
 from torchvision.models import ResNet50_Weights
-from torchvision.models.detection.backbone_utils import (
-    resnet_fpn_backbone, BackboneWithFPN
-)
+from torchvision.models.detection.faster_rcnn import FasterRCNN
+from torchvision.models.detection.backbone_utils import BackboneWithFPN
 from torchvision.models.detection.transform import (
     GeneralizedRCNNTransform, ImageList
 )
 from torchvision.utils import draw_bounding_boxes
-from torchvision.transforms.functional import convert_image_dtype
+import torchvision.transforms.functional as TF
 from torch.utils.tensorboard import SummaryWriter  # type: ignore
 from torchvision.models.detection.faster_rcnn import fasterrcnn_resnet50_fpn_v2
 from torchvision.models.detection.roi_heads import RoIHeads
@@ -28,6 +27,7 @@ from torchvision.models.detection.rpn import RegionProposalNetwork
 from torchvision.io import read_image, ImageReadMode
 import pytorch_lightning as pl
 from pytorch_lightning.callbacks import EarlyStopping, ModelCheckpoint
+import albumentations as A
 from tqdm import tqdm
 
 # IMPORTANT: Install torchmetrics via
@@ -73,7 +73,10 @@ class ObjectsDataset(Dataset):
     class_names = ['battery', 'dice', 'toycar', 'candle', 'highlighter', 'spoon']
 
     def __init__(
-        self, root_dir: str | PathLike, mode: Literal['train', 'val', 'test']
+        self,
+        root_dir: str | PathLike,
+        mode: Literal['train', 'val', 'test'],
+        transform: Optional[Callable[[Tensor, Tensor], Tuple[Tensor, Tensor]]] = None
     ) -> None:
         """"Object Detection: Batteries, Dice, and Toy Cars" from Kaggle.
         See https://www.kaggle.com/datasets/markcsizmadia/object-detection-batteries-dices-and-toy-cars?select=dataset
@@ -87,6 +90,7 @@ class ObjectsDataset(Dataset):
         self.class_name_to_int = {
             name: i for i, name in enumerate(self.class_names, 1)
         }
+        self.transform = transform
 
     def __len__(self) -> int:
         return len(self.image_names)
@@ -97,7 +101,7 @@ class ObjectsDataset(Dataset):
         targets_path = self.root_dir / self.mode / 'labels' / f'{name}.txt'
 
         image = read_image(str(image_path), ImageReadMode.RGB)
-        image = convert_image_dtype(image, torch.float32)
+        image = TF.convert_image_dtype(image, torch.float32)
 
         targets_tensor = torch.from_numpy(
             np.loadtxt(
@@ -109,12 +113,54 @@ class ObjectsDataset(Dataset):
                 ndmin=2,
             )
         )
-        targets: TargetsDict = {
-            'labels': targets_tensor[:, 0],
-            'boxes': targets_tensor[:, 1:],
-        }
+        labels, boxes = targets_tensor[:, 0], targets_tensor[:, 1:]
+        
+        if self.transform is not None:
+            image, boxes = self.transform(image, boxes)
 
+        targets: TargetsDict = {
+            'labels': labels,
+            'boxes': boxes,
+        }
         return name, image, targets
+
+
+class TorchAlbumentations:
+    
+    def __init__(self, transform):
+        """Wrapper around an Albumentations transform to handle type and name conversions."""
+        self.transform = transform
+    
+    def __call__(self, image: Tensor, boxes: Tensor) -> Tuple[Tensor, Tensor]:
+        image = torch.permute(image, (1, 2, 0))
+        transformed = self.transform(
+            image=image.cpu().numpy(),
+            bboxes=boxes.cpu().numpy()
+        )
+        t_image = torch.from_numpy(transformed['image'])
+        t_image = torch.permute(t_image, (2, 0, 1))
+        t_boxes = torch.tensor(transformed['bboxes']).to(torch.int64)
+        return t_image, t_boxes
+
+
+def get_transform() -> TorchAlbumentations:
+    transform = TorchAlbumentations(A.Compose(
+        [
+            A.HorizontalFlip(),
+            A.RandomRotate90(),
+            A.RandomBrightnessContrast(),
+        ],
+        bbox_params=A.BboxParams(format='pascal_voc', label_fields=[])
+    ))
+    return transform
+
+
+def get_fasterrcnn(num_classes: Optional[int] = None) -> FasterRCNN:
+    fasterrcnn = fasterrcnn_resnet50_fpn_v2(
+        weights_backbone=ResNet50_Weights.DEFAULT,
+        num_classes=num_classes
+    )
+    return fasterrcnn
 
 
 def transpose(batch):
@@ -151,14 +197,6 @@ def create_dataloaders(
         num_workers=num_workers,
     )
     return loader_train, loader_val, loader_test
-
-
-def get_resnet50_fpn_backbone() -> BackboneWithFPN:
-    return resnet_fpn_backbone(
-        backbone_name='resnet50',
-        weights=ResNet50_Weights.DEFAULT,
-        trainable_layers=3
-    )
 
 
 class LitFasterRCNN(pl.LightningModule):
@@ -216,7 +254,7 @@ class LitFasterRCNN(pl.LightningModule):
             self.class_names = class_names
         self.val_mean_ap = MeanAveragePrecision()
         self.test_mean_ap = MeanAveragePrecision(class_metrics=True)
-        self.model = fasterrcnn_resnet50_fpn_v2(num_classes=num_classes)
+        self.model = get_fasterrcnn(num_classes=num_classes)
 
         match self.phase:
             case 1:
@@ -390,7 +428,7 @@ class LitFasterRCNN(pl.LightningModule):
                 for k, s in zip(dt['labels'], dt['scores'])
             ]
             img = draw_bounding_boxes(
-                image=convert_image_dtype(img, torch.uint8),
+                image=TF.convert_image_dtype(img, torch.uint8),
                 labels=labels,
                 boxes=dt['boxes'],
             )
@@ -420,18 +458,18 @@ class LitFasterRCNN(pl.LightningModule):
         self.test_mean_ap.reset()
 
 
-def cache_proposals(
+def cache_fasterrcnn(
     ckpt: str,
     loader: DataLoader,
     cache_dir: str | PathLike,
     accelerator: Literal['cpu', 'gpu'] = 'cpu',
 ) -> None:
     images: List[Tensor]
-    proposals: List[Tensor]
+    output: List[Tensor]
     model: LitFasterRCNN
     
     model = LitFasterRCNN.load_from_checkpoint(ckpt)
-    print(f'Caching Faster R-CNN Phase {model.phase} Proposals')
+    print(f'Caching Faster R-CNN Phase {model.phase}')
 
     cache_dir = Path(cache_dir)
     cache_dir.mkdir(exist_ok=True, parents=True)
@@ -441,19 +479,23 @@ def cache_proposals(
     for image_names, images, _ in tqdm(loader):
         images = [img.to(device) for img in images]
         with torch.inference_mode():
-            proposals = model(images)
-        for image_name, proposal in zip(image_names, proposals):
+            output = model(images)
+        for image_name, proposal in zip(image_names, output):
             torch.save(proposal.cpu(), cache_dir / f'{image_name}.pt')
 
 
 class Phase2Dataset(ObjectsDataset):
 
     def __init__(
-        self, root_dir: str | PathLike, mode: Literal['train', 'val', 'test'],
-        proposals_dir: str | PathLike
+        self,
+        root_dir: str | PathLike,
+        mode: Literal['train', 'val', 'test'],
+        proposals_dir: str | PathLike, 
     ) -> None:
-        """ObjectsDataset with proposals"""
-        super().__init__(root_dir, mode)
+        """ObjectsDataset with proposals.
+        No transform is used because proposals can lie outside the image bounds.
+        """
+        super().__init__(root_dir, mode, transform=None)
         self.proposals_dir = Path(proposals_dir)
 
         names = sorted(p.stem for p in self.proposals_dir.iterdir())
@@ -462,10 +504,12 @@ class Phase2Dataset(ObjectsDataset):
 
     def __getitem__(self, idx) -> Tuple[str, Tensor, TargetsDict, Tensor]:
         image_name, image, targets = super().__getitem__(idx)
-        proposals = torch.load(
-            self.proposals_dir / f'{image_name}.pt'
-        )
+        proposals = torch.load(self.proposals_dir / f'{image_name}.pt')
         return image_name, image, targets, proposals
+    
+    @classmethod
+    def from_objects_dataset(cls, dataset: ObjectsDataset, proposals_dir: str | PathLike):
+        return cls(dataset.root_dir, dataset.mode, proposals_dir)  # type: ignore
 
 
 def _train_faster_rcnn_phase(
@@ -478,6 +522,7 @@ def _train_faster_rcnn_phase(
     loader_val: Optional[DataLoader] = None,
     loader_test: Optional[DataLoader] = None,
     lr: float = 1e-4,
+    auto_lr_find = False,
     max_epochs: int = 10,
     accelerator: Literal['cpu', 'gpu'] = 'cpu',
     log_every_n_steps: int = 10,
@@ -507,7 +552,7 @@ def _train_faster_rcnn_phase(
         case 2:
             assert prev_ckpt is not None
             model = LitFasterRCNN.load_from_checkpoint(prev_ckpt, lr=lr, phase=phase)
-            model.model.backbone = fasterrcnn_resnet50_fpn_v2().backbone
+            model.model.backbone = get_fasterrcnn().backbone
         case 3 | 4:
             assert prev_ckpt is not None
             model = LitFasterRCNN.load_from_checkpoint(prev_ckpt, lr=lr, phase=phase)
@@ -528,10 +573,13 @@ def _train_faster_rcnn_phase(
                         save_weights_only=True
                     ),
                 ],
+                auto_lr_find=auto_lr_find,
                 max_epochs=max_epochs,
                 accelerator=accelerator,
                 log_every_n_steps=log_every_n_steps,
             )
+            if auto_lr_find:
+                trainer.tune(model, loader_train)
             trainer.fit(model, loader_train)
         case 4:
             assert loader_val is not None and loader_test is not None
@@ -545,10 +593,13 @@ def _train_faster_rcnn_phase(
                         monitor='val_map', mode='max', save_weights_only=True
                     ),
                 ],
+                auto_lr_find=auto_lr_find,
                 max_epochs=max_epochs,
                 accelerator=accelerator,
                 log_every_n_steps=log_every_n_steps,
             )
+            if auto_lr_find:
+                trainer.tune(model, loader_train, loader_val)
             trainer.fit(model, loader_train, loader_val)
             trainer.test(ckpt_path='best', dataloaders=loader_test)
         case _:
@@ -566,9 +617,10 @@ def train_faster_rcnn(
     num_workers: int,
 ):
     # Set up the datasets and dataloaders that are used in phases 1, 3 and 4.
-    dataset_train_p134 = ObjectsDataset(data_dir, mode='train')
+    dataset_train_p134 = ObjectsDataset(data_dir, mode='train', transform=get_transform())
     dataset_val_p134 = ObjectsDataset(data_dir, mode='val')
     dataset_test_p134 = ObjectsDataset(data_dir, mode='test')
+    dataset_cache_p1 = ObjectsDataset(data_dir, mode='train')
     loader_train_p134, loader_val_p134, loader_test_p134 = create_dataloaders(
         dataset_train_p134,
         dataset_val_p134,
@@ -577,6 +629,13 @@ def train_faster_rcnn(
         collate_fn=transpose,
         num_workers=num_workers,
     )
+    loader_cache_p1 = DataLoader(
+        dataset_cache_p1,
+        batch_size=batch_size,
+        collate_fn=transpose,
+        num_workers=num_workers
+    )
+    
     faster_rcnn_dir = Path(output_dir, 'faster_rcnn')
     class_names = ObjectsDataset.class_names
     num_classes = 1 + len(class_names)  # Including background
@@ -588,19 +647,18 @@ def train_faster_rcnn(
         loader_train=loader_train_p134,
         num_classes=num_classes,
         accelerator=accelerator,
-        lr=5e-5,
-        max_epochs=15,
+        # lr=5e-5,
+        auto_lr_find=True,
+        max_epochs=1,
         class_names=class_names,
     )
     proposals_dir = Path(ckpt1).parent.parent / 'proposals_cache'  # version_{i} / 'proposals_cache'
-    cache_proposals(
-        ckpt1, loader_train_p134, proposals_dir, accelerator=accelerator
+    cache_fasterrcnn(
+        ckpt1, loader_cache_p1, proposals_dir, accelerator=accelerator
     )
 
     # Set up the dataset and loader that is used in phase 2.
-    dataset_train_p2 = Phase2Dataset(
-        data_dir, mode='train', proposals_dir=proposals_dir
-    )
+    dataset_train_p2 = Phase2Dataset.from_objects_dataset(dataset_train_p134, proposals_dir)
     loader_train_p2 = DataLoader(
         dataset_train_p2,
         batch_size=batch_size,
@@ -615,8 +673,9 @@ def train_faster_rcnn(
         prev_ckpt=ckpt1,
         loader_train=loader_train_p2,
         accelerator=accelerator,
-        lr=5e-5,
-        max_epochs=15,
+        auto_lr_find=True,
+        # lr=5e-5,
+        max_epochs=1,
     )
     ckpt3 = _train_faster_rcnn_phase(
         phase=3,
@@ -624,8 +683,9 @@ def train_faster_rcnn(
         prev_ckpt=ckpt2,
         loader_train=loader_train_p134,
         accelerator=accelerator,
-        lr=1e-4,
-        max_epochs=15,
+        auto_lr_find=True,
+        # lr=1e-4,
+        max_epochs=1,
     )
     ckpt4 = _train_faster_rcnn_phase(
         phase=4,
@@ -635,8 +695,9 @@ def train_faster_rcnn(
         loader_val=loader_val_p134,
         loader_test=loader_test_p134,
         accelerator=accelerator,
-        lr=1e-4,
-        max_epochs=30,
+        auto_lr_find=True,
+        # lr=1e-4,
+        max_epochs=1,
     )
     return ckpt4
 
@@ -651,11 +712,24 @@ def main():
     faster_rcnn_ckpt = train_faster_rcnn(
         data_dir,
         output_dir,
-        batch_size=8,
+        batch_size=3,
         accelerator=accelerator,
-        num_workers=1,
+        num_workers=2,
     )
 
 
 if __name__ == '__main__':
     main()
+
+
+# from torchvision.utils import save_image
+# dataset = ObjectsDataset('data_dev', 'test')
+# _, image, targets = dataset[50]
+# transform = get_transform()
+# t_image, t_boxes = transform(image, targets['boxes'])
+# image, t_image = (TF.convert_image_dtype(im, torch.uint8) for im in (image, t_image))
+# im1 = draw_bounding_boxes(image, targets['boxes'])
+# im2 = draw_bounding_boxes(t_image, t_boxes)
+# im1, im2 = (TF.convert_image_dtype(im, torch.float32) for im in (im1, im2))
+# save_image([im1, im2], 'compare.png')
+
