@@ -363,12 +363,13 @@ def train_retinanet(
     trainer = pl.Trainer(
         default_root_dir=str(retinanet_dir),
         callbacks=[
-            EarlyStopping(monitor='val_map', mode='max', patience=7, verbose=True),
+            EarlyStopping(monitor='val_map', mode='max', patience=8, verbose=True),
             ModelCheckpoint(monitor='val_map', mode='max'),
         ],
         max_epochs=5,
         accelerator=accelerator,
         log_every_n_steps=10,
+        val_check_interval=0.5
     )
     trainer.fit(model, loader_train, loader_val)
     trainer.test(ckpt_path='best', dataloaders=loader_test)
@@ -638,7 +639,7 @@ def _train_fasterrcnn_phase(
     max_epochs: int = 10,
     accelerator: str = 'cpu',
     log_every_n_steps: int = 10,
-    patience: int = 7,
+    patience: int = 8,
     class_names: Optional[List[str]] = None
 ) -> str:
     """Train a Faster RCNN phase.
@@ -697,6 +698,7 @@ def _train_fasterrcnn_phase(
                 max_epochs=max_epochs,
                 accelerator=accelerator,
                 log_every_n_steps=log_every_n_steps,
+                val_check_interval=0.5
             )
             trainer.fit(model, loader_train, loader_val)
             trainer.test(ckpt_path='best', dataloaders=loader_test)
@@ -803,17 +805,9 @@ def train_fasterrcnn(
 def main():
     # Setup
     pl.seed_everything(42)
-    data_dir = Path('data')
+    data_dir = Path('data_dev')
     output_dir = Path('output_dev')
     accelerator = 'gpu' if torch.cuda.is_available() else 'cpu'
-
-    fasterrcnn_ckpt = train_fasterrcnn(
-        data_dir,
-        output_dir,
-        batch_size=3,
-        accelerator=accelerator,
-        num_workers=2,
-    )
 
     retinanet_ckpt = train_retinanet(
         data_dir,
@@ -822,6 +816,15 @@ def main():
         accelerator=accelerator,
         num_workers=2,
     )
+    
+    # fasterrcnn_ckpt = train_fasterrcnn(
+    #     data_dir,
+    #     output_dir,
+    #     batch_size=3,
+    #     accelerator=accelerator,
+    #     num_workers=2,
+    # )
+
 
 if __name__ == '__main__':
     main()
