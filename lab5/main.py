@@ -2,7 +2,6 @@
 import itertools
 from os import PathLike
 from pathlib import Path
-import random
 from typing import (
     Callable, Dict, List, Literal, Optional, Tuple, TypedDict, Union
 )
@@ -10,21 +9,27 @@ from typing import (
 import numpy as np
 import torch
 from torch import Tensor
-from torch.optim import Adam, Optimizer
+from torch.optim import Adam
 from torch.utils.data import Dataset, DataLoader
 from torchvision.models import ResNet50_Weights
-from torchvision.models.detection.faster_rcnn import FasterRCNN
+from torchvision.utils import draw_bounding_boxes
+import torchvision.transforms.functional as TF
+from torchvision.io import read_image, ImageReadMode
+from torch.utils.tensorboard import SummaryWriter  # type: ignore
+
 from torchvision.models.detection.backbone_utils import BackboneWithFPN
+from torchvision.models.detection.roi_heads import RoIHeads
+from torchvision.models.detection.rpn import RegionProposalNetwork
 from torchvision.models.detection.transform import (
     GeneralizedRCNNTransform, ImageList
 )
-from torchvision.utils import draw_bounding_boxes
-import torchvision.transforms.functional as TF
-from torch.utils.tensorboard import SummaryWriter  # type: ignore
-from torchvision.models.detection.faster_rcnn import fasterrcnn_resnet50_fpn_v2
-from torchvision.models.detection.roi_heads import RoIHeads
-from torchvision.models.detection.rpn import RegionProposalNetwork
-from torchvision.io import read_image, ImageReadMode
+from torchvision.models.detection.faster_rcnn import (
+    fasterrcnn_resnet50_fpn_v2, FasterRCNN
+)
+from torchvision.models.detection.retinanet import (
+    retinanet_resnet50_fpn_v2, RetinaNet
+)
+
 import pytorch_lightning as pl
 from pytorch_lightning.callbacks import EarlyStopping, ModelCheckpoint
 import albumentations as A
@@ -46,15 +51,20 @@ class TargetsDict(TypedDict):
     boxes: Tensor
 
 
-class RPNLossesDict(TypedDict):
+class RcnnRpnLossesDict(TypedDict):
     loss_objectness: Tensor
     loss_rpn_box_reg: Tensor
 
 
-class DetectorLossesDict(TypedDict):
+class RcnnDetectorLossesDict(TypedDict):
     loss_classifier: Tensor
     loss_box_reg: Tensor
-    
+
+
+class RetinanetLossesDict(TypedDict):
+    classification: Tensor
+    bbox_regression: Tensor
+
 
 class DetectionsDict(TypedDict):
     labels: Tensor
@@ -62,10 +72,8 @@ class DetectionsDict(TypedDict):
     scores: Tensor
     
 
-ObjectsBatchType = Union[
-    Tuple[List[str], List[Tensor], List[TargetsDict]],
-    Tuple[List[str], List[Tensor], List[TargetsDict], List[Tensor]]
-]
+ObjectsBatchType = Tuple[List[str], List[Tensor], List[TargetsDict]]
+Phase2BatchType = Tuple[List[str], List[Tensor], List[TargetsDict], List[Tensor]]
 
 
 class ObjectsDataset(Dataset):
@@ -199,7 +207,179 @@ def create_dataloaders(
     return loader_train, loader_val, loader_test
 
 
-class LitFasterRCNN(pl.LightningModule):
+class LitDetector(pl.LightningModule):
+    
+    def __init__(
+        self,
+        num_classes: int,
+        lr: float = 1e-4,
+        class_names: Optional[List[str]] = None,
+        **kwargs
+    ) -> None:
+        """Basic functionality for an object detection model.
+        Mean average precision and related metrics are logged on each validation and test epoch ending.
+        During testing, all the images with predicted boxes and classes are logged.
+        
+        `num_classes` includes the background
+        `label_names` does not include the background
+        
+        To log any other hyperparameters, pass them as keyword arguments.
+        """
+        super().__init__()
+        self.save_hyperparameters()
+        self.lr = lr
+        if class_names is None:
+            self.class_names = list(map(str, range(1, num_classes)))
+        else:
+            self.class_names = class_names
+        self.val_mean_ap = MeanAveragePrecision()
+        self.test_mean_ap = MeanAveragePrecision(class_metrics=True)
+    
+    def shared_val_test_step(
+        self, batch
+    ) -> Tuple[List[str], List[Tensor], List[TargetsDict], List[DetectionsDict]]:
+        raise NotImplementedError
+    
+    def validation_step(
+        self,
+        batch: ObjectsBatchType | Phase2BatchType,
+        batch_idx: int,
+    ) -> None:
+        _, _, targets, detections = self.shared_val_test_step(batch)
+        self.val_mean_ap.update(detections, targets)  # type: ignore
+
+    def test_step(
+        self,
+        batch: ObjectsBatchType | Phase2BatchType,
+        batch_idx: int
+    ) -> None:
+        image_names, images, targets, detections = self.shared_val_test_step(batch)
+        self.test_mean_ap.update(detections, targets)  # type: ignore
+        self.log_images(images, detections, image_names)
+
+    def log_images(
+        self,
+        images: List[Tensor],
+        detections: List[DetectionsDict],
+        image_names: List[str],
+    ) -> None:    
+        """Log images with boxes and labels to TensorBoard"""
+        tensorboard: SummaryWriter = self.logger.experiment  # type: ignore
+        for name, img, dt in zip(image_names, images, detections, strict=True):
+            labels = [
+                f'{self.class_names[k - 1]}:{s:.0%}'
+                for k, s in zip(dt['labels'], dt['scores'])
+            ]
+            img = draw_bounding_boxes(
+                image=TF.convert_image_dtype(img, torch.uint8),
+                labels=labels,
+                boxes=dt['boxes'],
+            )
+            tensorboard.add_image(tag=name, img_tensor=img)
+        
+    def validation_epoch_end(self, outputs) -> None:
+        metrics = self.val_mean_ap.compute()
+        self.log_dict({f'val_{k}': v for k, v in metrics.items()})
+        self.val_mean_ap.reset()
+
+    def test_epoch_end(self, outputs) -> None:
+        metrics = self.test_mean_ap.compute()
+
+        map_per_class = metrics.pop('map_per_class')
+        mar_100_per_class = metrics.pop('mar_100_per_class')
+
+        metrics.update(
+            (f'map_class_{label}', x) 
+            for label, x in zip(self.class_names, map_per_class)
+        )
+        metrics.update(
+            (f'mar_100_class_{label}', x)
+            for label, x in zip(self.class_names, mar_100_per_class)
+        )
+
+        self.log_dict({f'test_{k}': v for k, v in metrics.items()})
+        self.test_mean_ap.reset()
+
+
+class LitRetinaNet(LitDetector):
+    
+    def __init__(self, num_classes: int, lr: float = 0.0001, class_names: Optional[List[str]] = None, **kwargs) -> None:
+        super().__init__(num_classes, lr, class_names, **kwargs)
+        self.model = retinanet_resnet50_fpn_v2(
+            weights_backbone=ResNet50_Weights.DEFAULT,
+            num_classes=num_classes
+        )
+    
+    def forward(
+        self,
+        images: List[Tensor],
+        targets: Optional[List[TargetsDict]] = None,
+    ) -> RetinanetLossesDict | DetectionsDict:
+        return self.model(images, targets)
+    
+    def configure_optimizers(self):
+        return Adam(self.model.parameters(), self.lr)
+    
+    def training_step(self, batch: ObjectsBatchType, batch_idx: int) -> Tensor:
+        _, images, targets = batch
+        losses: RetinanetLossesDict = self(images, targets)
+        loss = losses['bbox_regression'] + losses['classification']
+        self.log_dict(
+            {f'train_{k}': v for k, v in losses.items()} |  # type: ignore
+            {'train_loss': loss}
+        )
+        return loss
+
+    def shared_val_test_step(
+        self, batch: ObjectsBatchType
+    ) -> Tuple[List[str], List[Tensor], List[TargetsDict], List[DetectionsDict]]:
+        image_names, images, targets = batch
+        detections: List[DetectionsDict] = self(images)    
+        return image_names, images, targets, detections
+
+
+def train_retinanet(
+    data_dir: str | PathLike,
+    output_dir: str | PathLike,
+    batch_size: int,
+    accelerator: str,
+    num_workers: int,
+) -> str:
+    print('Training RetinaNet')
+    dataset_train = ObjectsDataset(data_dir, mode='train', transform=get_transform())
+    dataset_val = ObjectsDataset(data_dir, mode='val')
+    dataset_test = ObjectsDataset(data_dir, mode='test')
+    loader_train, loader_val, loader_test = create_dataloaders(
+        dataset_train,
+        dataset_val,
+        dataset_test,
+        batch_size=batch_size,
+        collate_fn=transpose,
+        num_workers=num_workers,
+    )
+    retinanet_dir = Path(output_dir, 'retinanet')
+    class_names = ObjectsDataset.class_names
+    num_classes = 1 + len(class_names)  # Including background
+    
+    model = LitRetinaNet(num_classes=num_classes, lr=1e-3, class_names=class_names)
+    trainer = pl.Trainer(
+        default_root_dir=str(retinanet_dir),
+        callbacks=[
+            EarlyStopping(monitor='val_map', mode='max', patience=7, verbose=True),
+            ModelCheckpoint(monitor='val_map', mode='max'),
+        ],
+        max_epochs=5,
+        accelerator=accelerator,
+        log_every_n_steps=10,
+    )
+    trainer.fit(model, loader_train, loader_val)
+    trainer.test(ckpt_path='best', dataloaders=loader_test)
+    
+    ckpt: str = trainer.checkpoint_callback.best_model_path  # type: ignore
+    return ckpt
+
+
+class LitFasterRCNN(LitDetector):
 
     def __init__(
         self,
@@ -207,6 +387,7 @@ class LitFasterRCNN(pl.LightningModule):
         lr: float = 1e-4,
         phase: Literal[1, 2, 3, 4] = 1,
         class_names: Optional[List[str]] = None,
+        **kwargs
     ) -> None:
         
         """Faster R-CNN 4-Step Alternating Training.
@@ -223,7 +404,7 @@ class LitFasterRCNN(pl.LightningModule):
             - Phases 2 and 4: Returns the detection losses if training else returns the detections.
               The combined loss is the sum of the detection losses.
         
-        Model training (see also `train_faster_rcnn`)
+        Model training (see also `train_fasterrcnn`)
             - Phase 1: Train all layers (cache the proposals with `cache_phase1_proposals`).
             - Phase 2: Train all layers (with a new backbone, using the proposals from from phase 1).
             - Phase 3: Train only the RPN.
@@ -242,20 +423,12 @@ class LitFasterRCNN(pl.LightningModule):
             class_names (Optional[List[str]], optional): Names of the classes (excluding the background).
                 If None then ['1', ..., '`num_classes`'] is used. Defaults to None.
         """
-        # num_classes includes the background
-        # label_names does not include the background
-        super().__init__()
-        self.save_hyperparameters()
-        self.lr = lr
-        self.phase = phase
-        if class_names is None:
-            self.class_names = list(map(str, range(1, num_classes)))
-        else:
-            self.class_names = class_names
-        self.val_mean_ap = MeanAveragePrecision()
-        self.test_mean_ap = MeanAveragePrecision(class_metrics=True)
-        self.model = get_fasterrcnn(num_classes=num_classes)
 
+        super().__init__(num_classes, lr, class_names, phase=phase, **kwargs)
+        
+        self.model = get_fasterrcnn(num_classes=num_classes)
+        self.phase = phase
+        
         match self.phase:
             case 1:
                 self.model.roi_heads.requires_grad_(False)  # Not used
@@ -275,15 +448,15 @@ class LitFasterRCNN(pl.LightningModule):
         images: List[Tensor],
         targets: Optional[List[TargetsDict]] = None,
         cached_proposals: Optional[List[Tensor]] = None,
-    ) -> RPNLossesDict | DetectionsDict | List[Tensor] | List[DetectionsDict]:
+    ) -> RcnnRpnLossesDict | DetectionsDict | List[Tensor] | List[DetectionsDict]:
         """See also torchvision.models.detection.generalized_rcnn.GeneralizedRCNN.forward()"""
         image_list: ImageList
         original_image_sizes: List[Tuple[int, int]]
         features: Dict[str, Tensor]
         proposals: List[Tensor]
         detections: List[DetectionsDict]
-        proposal_losses: RPNLossesDict | EmptyDict  # Empty if not training.
-        detector_losses: DetectorLossesDict | EmptyDict  # Empty if not training.
+        proposal_losses: RcnnRpnLossesDict | EmptyDict  # Empty if not training.
+        detector_losses: RcnnDetectorLossesDict | EmptyDict  # Empty if not training.
 
         transform: GeneralizedRCNNTransform = self.model.transform  # type: ignore
         backbone: BackboneWithFPN = self.model.backbone  # type: ignore
@@ -330,7 +503,7 @@ class LitFasterRCNN(pl.LightningModule):
                 raise ValueError('Invalid (phase, training) combination'
                                  f'({self.phase}, {self.training})')
 
-    def configure_optimizers(self) -> Optimizer:
+    def configure_optimizers(self):
         model = self.model
 
         match self.phase:
@@ -351,8 +524,10 @@ class LitFasterRCNN(pl.LightningModule):
 
         return Adam(params, lr=self.lr)
 
-    def training_step(self, batch: ObjectsBatchType, batch_idx: int) -> Tensor:
-        losses: RPNLossesDict | DetectorLossesDict
+    def training_step(
+        self, batch: ObjectsBatchType | Phase2BatchType, batch_idx: int
+    ) -> Tensor:
+        losses: RcnnRpnLossesDict | RcnnDetectorLossesDict
 
         match self.phase:
             case 1 | 3 | 4:
@@ -374,8 +549,8 @@ class LitFasterRCNN(pl.LightningModule):
 
         return loss
 
-    def _shared_val_test_step(
-        self, batch: ObjectsBatchType,
+    def shared_val_test_step(
+        self, batch: ObjectsBatchType | Phase2BatchType,
     ) -> Tuple[List[str], List[Tensor], List[TargetsDict], List[DetectionsDict]]:
         detections: List[DetectionsDict]
 
@@ -386,83 +561,23 @@ class LitFasterRCNN(pl.LightningModule):
                 )
             case 4:
                 assert len(batch) == 3
-                image_name, images, targets = batch
+                image_names, images, targets = batch
                 detections = self(images)
             case 2:
                 assert len(batch) == 4
-                image_name, images, targets, cached_proposals = batch
+                image_names, images, targets, cached_proposals = batch
                 detections = self(images, cached_proposals=cached_proposals)
             case _:
                 raise ValueError(f'Invalid phase value {self.phase}')
 
-        return image_name, images, targets, detections
-
-    def validation_step(
-        self,
-        batch: ObjectsBatchType,
-        batch_idx: int,
-    ) -> None:
-        _, _, targets, detections = self._shared_val_test_step(batch)
-        self.val_mean_ap.update(detections, targets)  # type: ignore
-
-    def test_step(
-        self,
-        batch: ObjectsBatchType,
-        batch_idx: int
-    ) -> None:
-        image_names, images, targets, detections = self._shared_val_test_step(batch)
-        self.test_mean_ap.update(detections, targets)  # type: ignore
-        self.log_images(images, detections, image_names)
-    
-    def log_images(
-        self,
-        images: List[Tensor],
-        detections: List[DetectionsDict],
-        image_names: List[str],
-    ) -> None:    
-        """Log images with boxes and labels to TensorBoard"""
-        tensorboard: SummaryWriter = self.logger.experiment  # type: ignore
-        for name, img, dt in zip(image_names, images, detections, strict=True):
-            labels = [
-                f'{self.class_names[k - 1]}:{s:.0%}'
-                for k, s in zip(dt['labels'], dt['scores'])
-            ]
-            img = draw_bounding_boxes(
-                image=TF.convert_image_dtype(img, torch.uint8),
-                labels=labels,
-                boxes=dt['boxes'],
-            )
-            tensorboard.add_image(tag=name, img_tensor=img)
-        
-    def validation_epoch_end(self, outputs) -> None:
-        metrics = self.val_mean_ap.compute()
-        self.log_dict({f'val_{k}': v for k, v in metrics.items()})
-        self.val_mean_ap.reset()
-
-    def test_epoch_end(self, outputs) -> None:
-        metrics = self.test_mean_ap.compute()
-
-        map_per_class = metrics.pop('map_per_class')
-        mar_100_per_class = metrics.pop('mar_100_per_class')
-
-        metrics.update(
-            (f'map_class_{label}', x) 
-            for label, x in zip(self.class_names, map_per_class)
-        )
-        metrics.update(
-            (f'mar_100_class_{label}', x)
-            for label, x in zip(self.class_names, mar_100_per_class)
-        )
-
-        self.log_dict({f'test_{k}': v for k, v in metrics.items()})
-        self.test_mean_ap.reset()
+        return image_names, images, targets, detections
 
 
 def cache_fasterrcnn(
     ckpt: str,
     loader: DataLoader,
     cache_dir: str | PathLike,
-    accelerator: Literal['cpu', 'gpu'] = 'cpu',
+    accelerator: str = 'cpu',
 ) -> None:
     images: List[Tensor]
     output: List[Tensor]
@@ -512,7 +627,7 @@ class Phase2Dataset(ObjectsDataset):
         return cls(dataset.root_dir, dataset.mode, proposals_dir)  # type: ignore
 
 
-def _train_faster_rcnn_phase(
+def _train_fasterrcnn_phase(
     phase: Literal[1, 2, 3, 4],
     *,
     loader_train: DataLoader,
@@ -522,9 +637,8 @@ def _train_faster_rcnn_phase(
     loader_val: Optional[DataLoader] = None,
     loader_test: Optional[DataLoader] = None,
     lr: float = 1e-4,
-    auto_lr_find = False,
     max_epochs: int = 10,
-    accelerator: Literal['cpu', 'gpu'] = 'cpu',
+    accelerator: str = 'cpu',
     log_every_n_steps: int = 10,
     patience: int = 7,
     class_names: Optional[List[str]] = None
@@ -567,39 +681,25 @@ def _train_faster_rcnn_phase(
             trainer = pl.Trainer(
                 default_root_dir=default_root_dir,
                 callbacks=[
-                    ModelCheckpoint(
-                        monitor='train_loss',
-                        mode='min',
-                        save_weights_only=True
-                    ),
+                    ModelCheckpoint(monitor='train_loss', mode='min', save_weights_only=True),
                 ],
-                auto_lr_find=auto_lr_find,
                 max_epochs=max_epochs,
                 accelerator=accelerator,
                 log_every_n_steps=log_every_n_steps,
             )
-            if auto_lr_find:
-                trainer.tune(model, loader_train)
             trainer.fit(model, loader_train)
         case 4:
             assert loader_val is not None and loader_test is not None
             trainer = pl.Trainer(
                 default_root_dir=default_root_dir,
                 callbacks=[
-                    EarlyStopping(
-                        monitor='val_map', mode='max', patience=patience, verbose=True
-                    ),
-                    ModelCheckpoint(
-                        monitor='val_map', mode='max', save_weights_only=True
-                    ),
+                    EarlyStopping(monitor='val_map', mode='max', patience=patience, verbose=True),
+                    ModelCheckpoint(monitor='val_map', mode='max'),
                 ],
-                auto_lr_find=auto_lr_find,
                 max_epochs=max_epochs,
                 accelerator=accelerator,
                 log_every_n_steps=log_every_n_steps,
             )
-            if auto_lr_find:
-                trainer.tune(model, loader_train, loader_val)
             trainer.fit(model, loader_train, loader_val)
             trainer.test(ckpt_path='best', dataloaders=loader_test)
         case _:
@@ -609,13 +709,14 @@ def _train_faster_rcnn_phase(
     return new_ckpt
 
 
-def train_faster_rcnn(
+def train_fasterrcnn(
     data_dir: str | PathLike,
     output_dir: str | PathLike,
     batch_size: int,
-    accelerator: Literal['cpu', 'gpu'],
+    accelerator: str,
     num_workers: int,
-):
+) -> str:
+    print('Training Faster R-CNN')
     # Set up the datasets and dataloaders that are used in phases 1, 3 and 4.
     dataset_train_p134 = ObjectsDataset(data_dir, mode='train', transform=get_transform())
     dataset_val_p134 = ObjectsDataset(data_dir, mode='val')
@@ -636,21 +737,19 @@ def train_faster_rcnn(
         num_workers=num_workers,
         shuffle=False
     )
-    
-    faster_rcnn_dir = Path(output_dir, 'faster_rcnn')
+    fasterrcnn_dir = Path(output_dir, 'fasterrcnn')
     class_names = ObjectsDataset.class_names
     num_classes = 1 + len(class_names)  # Including background
 
     # Train phase 1 and cache the proposals.
-    ckpt1 = _train_faster_rcnn_phase(
+    ckpt1 = _train_fasterrcnn_phase(
         phase=1,
-        output_dir=faster_rcnn_dir,
+        output_dir=fasterrcnn_dir,
         loader_train=loader_train_p134,
         num_classes=num_classes,
         accelerator=accelerator,
-        # auto_lr_find=True,
         lr=5e-5,
-        max_epochs=5,
+        max_epochs=1,
         class_names=class_names,
     )
     proposals_dir = Path(ckpt1).parent.parent / 'proposals_cache'  # version_{i} / 'proposals_cache'
@@ -667,39 +766,40 @@ def train_faster_rcnn(
     )
 
     # Train phases 2, 3 and 4, and return the best phase 4 model checkpoint path.
-    ckpt2 = _train_faster_rcnn_phase(
+    ckpt2 = _train_fasterrcnn_phase(
         phase=2,
-        output_dir=faster_rcnn_dir,
+        output_dir=fasterrcnn_dir,
         prev_ckpt=ckpt1,
         loader_train=loader_train_p2,
         accelerator=accelerator,
-        # auto_lr_find=True,
         lr=1e-5,
-        max_epochs=5,
+        max_epochs=1,
     )
-    ckpt3 = _train_faster_rcnn_phase(
+    ckpt3 = _train_fasterrcnn_phase(
         phase=3,
-        output_dir=faster_rcnn_dir,
+        output_dir=fasterrcnn_dir,
         prev_ckpt=ckpt2,
         loader_train=loader_train_p134,
         accelerator=accelerator,
-        # auto_lr_find=True,
         lr=1e-4,
-        max_epochs=5,
+        max_epochs=1,
     )
-    ckpt4 = _train_faster_rcnn_phase(
+    ckpt4 = _train_fasterrcnn_phase(
         phase=4,
-        output_dir=faster_rcnn_dir,
+        output_dir=fasterrcnn_dir,
         prev_ckpt=ckpt3,
         loader_train=loader_train_p134,
         loader_val=loader_val_p134,
         loader_test=loader_test_p134,
         accelerator=accelerator,
-        # auto_lr_find=True,
         lr=1e-5,
-        max_epochs=10,
+        max_epochs=1,
     )
     return ckpt4
+
+
+# %%
+
 
 
 def main():
@@ -709,14 +809,21 @@ def main():
     output_dir = Path('output_dev')
     accelerator = 'gpu' if torch.cuda.is_available() else 'cpu'
 
-    faster_rcnn_ckpt = train_faster_rcnn(
+    # fasterrcnn_ckpt = train_fasterrcnn(
+    #     data_dir,
+    #     output_dir,
+    #     batch_size=3,
+    #     accelerator=accelerator,
+    #     num_workers=2,
+    # )
+
+    retinanet_ckpt = train_retinanet(
         data_dir,
         output_dir,
         batch_size=3,
         accelerator=accelerator,
         num_workers=2,
     )
-
 
 if __name__ == '__main__':
     main()
