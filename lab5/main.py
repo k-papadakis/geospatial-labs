@@ -620,7 +620,7 @@ def train_faster_rcnn(
     dataset_train_p134 = ObjectsDataset(data_dir, mode='train', transform=get_transform())
     dataset_val_p134 = ObjectsDataset(data_dir, mode='val')
     dataset_test_p134 = ObjectsDataset(data_dir, mode='test')
-    dataset_cache_p1 = ObjectsDataset(data_dir, mode='train')
+    dataset_cache_p1 = ObjectsDataset(data_dir, mode='train', transform=None)
     loader_train_p134, loader_val_p134, loader_test_p134 = create_dataloaders(
         dataset_train_p134,
         dataset_val_p134,
@@ -633,7 +633,8 @@ def train_faster_rcnn(
         dataset_cache_p1,
         batch_size=batch_size,
         collate_fn=transpose,
-        num_workers=num_workers
+        num_workers=num_workers,
+        shuffle=False
     )
     
     faster_rcnn_dir = Path(output_dir, 'faster_rcnn')
@@ -647,23 +648,22 @@ def train_faster_rcnn(
         loader_train=loader_train_p134,
         num_classes=num_classes,
         accelerator=accelerator,
-        # lr=5e-5,
-        auto_lr_find=True,
-        max_epochs=1,
+        # auto_lr_find=True,
+        lr=5e-5,
+        max_epochs=5,
         class_names=class_names,
     )
     proposals_dir = Path(ckpt1).parent.parent / 'proposals_cache'  # version_{i} / 'proposals_cache'
-    cache_fasterrcnn(
-        ckpt1, loader_cache_p1, proposals_dir, accelerator=accelerator
-    )
+    cache_fasterrcnn(ckpt1, loader_cache_p1, proposals_dir, accelerator=accelerator)
 
     # Set up the dataset and loader that is used in phase 2.
-    dataset_train_p2 = Phase2Dataset.from_objects_dataset(dataset_train_p134, proposals_dir)
+    dataset_train_p2 = Phase2Dataset.from_objects_dataset(dataset_cache_p1, proposals_dir)
     loader_train_p2 = DataLoader(
         dataset_train_p2,
         batch_size=batch_size,
         collate_fn=transpose,
         num_workers=num_workers,
+        shuffle=True
     )
 
     # Train phases 2, 3 and 4, and return the best phase 4 model checkpoint path.
@@ -673,9 +673,9 @@ def train_faster_rcnn(
         prev_ckpt=ckpt1,
         loader_train=loader_train_p2,
         accelerator=accelerator,
-        auto_lr_find=True,
-        # lr=5e-5,
-        max_epochs=1,
+        # auto_lr_find=True,
+        lr=1e-5,
+        max_epochs=5,
     )
     ckpt3 = _train_faster_rcnn_phase(
         phase=3,
@@ -683,9 +683,9 @@ def train_faster_rcnn(
         prev_ckpt=ckpt2,
         loader_train=loader_train_p134,
         accelerator=accelerator,
-        auto_lr_find=True,
-        # lr=1e-4,
-        max_epochs=1,
+        # auto_lr_find=True,
+        lr=1e-4,
+        max_epochs=5,
     )
     ckpt4 = _train_faster_rcnn_phase(
         phase=4,
@@ -695,9 +695,9 @@ def train_faster_rcnn(
         loader_val=loader_val_p134,
         loader_test=loader_test_p134,
         accelerator=accelerator,
-        auto_lr_find=True,
-        # lr=1e-4,
-        max_epochs=1,
+        # auto_lr_find=True,
+        lr=1e-5,
+        max_epochs=10,
     )
     return ckpt4
 
@@ -706,7 +706,7 @@ def main():
     # Setup
     pl.seed_everything(42)
     data_dir = Path('data')
-    output_dir = Path('output')
+    output_dir = Path('output_dev')
     accelerator = 'gpu' if torch.cuda.is_available() else 'cpu'
 
     faster_rcnn_ckpt = train_faster_rcnn(
