@@ -3,7 +3,7 @@ import itertools
 from os import PathLike
 from pathlib import Path
 from typing import (
-    Callable, Dict, List, Literal, Optional, Tuple, TypedDict, Union
+    Callable, Dict, List, Literal, Optional, Tuple, TypedDict
 )
 
 import numpy as np
@@ -26,9 +26,7 @@ from torchvision.models.detection.transform import (
 from torchvision.models.detection.faster_rcnn import (
     fasterrcnn_resnet50_fpn_v2, FasterRCNN
 )
-from torchvision.models.detection.retinanet import (
-    retinanet_resnet50_fpn_v2, RetinaNet
-)
+from torchvision.models.detection.retinanet import retinanet_resnet50_fpn_v2
 
 import pytorch_lightning as pl
 from pytorch_lightning.callbacks import EarlyStopping, ModelCheckpoint
@@ -361,7 +359,7 @@ def train_retinanet(
     class_names = ObjectsDataset.class_names
     num_classes = 1 + len(class_names)  # Including background
     
-    model = LitRetinaNet(num_classes=num_classes, lr=1e-3, class_names=class_names)
+    model = LitRetinaNet(num_classes=num_classes, lr=1e-4, class_names=class_names)
     trainer = pl.Trainer(
         default_root_dir=str(retinanet_dir),
         callbacks=[
@@ -748,7 +746,7 @@ def train_fasterrcnn(
         loader_train=loader_train_p134,
         num_classes=num_classes,
         accelerator=accelerator,
-        lr=5e-5,
+        lr=1e-4,
         max_epochs=1,
         class_names=class_names,
     )
@@ -764,7 +762,7 @@ def train_fasterrcnn(
         num_workers=num_workers,
         shuffle=True
     )
-
+    
     # Train phases 2, 3 and 4, and return the best phase 4 model checkpoint path.
     ckpt2 = _train_fasterrcnn_phase(
         phase=2,
@@ -772,7 +770,7 @@ def train_fasterrcnn(
         prev_ckpt=ckpt1,
         loader_train=loader_train_p2,
         accelerator=accelerator,
-        lr=1e-5,
+        lr=1e-4,
         max_epochs=1,
     )
     ckpt3 = _train_fasterrcnn_phase(
@@ -792,7 +790,7 @@ def train_fasterrcnn(
         loader_val=loader_val_p134,
         loader_test=loader_test_p134,
         accelerator=accelerator,
-        lr=1e-5,
+        lr=1e-4,
         max_epochs=1,
     )
     return ckpt4
@@ -809,13 +807,13 @@ def main():
     output_dir = Path('output_dev')
     accelerator = 'gpu' if torch.cuda.is_available() else 'cpu'
 
-    # fasterrcnn_ckpt = train_fasterrcnn(
-    #     data_dir,
-    #     output_dir,
-    #     batch_size=3,
-    #     accelerator=accelerator,
-    #     num_workers=2,
-    # )
+    fasterrcnn_ckpt = train_fasterrcnn(
+        data_dir,
+        output_dir,
+        batch_size=3,
+        accelerator=accelerator,
+        num_workers=2,
+    )
 
     retinanet_ckpt = train_retinanet(
         data_dir,
