@@ -23,14 +23,9 @@ from torchvision.models.detection.retinanet import retinanet_resnet50_fpn_v2
 
 import pytorch_lightning as pl
 from pytorch_lightning.callbacks import EarlyStopping, ModelCheckpoint
+from torchmetrics.detection.mean_ap import MeanAveragePrecision
 import albumentations as A
 from tqdm import tqdm
-
-# IMPORTANT: Install torchmetrics via
-# pip install git+https://github.com/k-papadakis/metrics.git#egg=torchmetrics
-# otherwise MeanAveragePrecision might not work.
-# See this https://github.com/Lightning-AI/metrics/issues/1147
-from torchmetrics.detection.mean_ap import MeanAveragePrecision
 
 
 class EmptyDict(TypedDict):
@@ -120,7 +115,7 @@ class ObjectsDataset(Dataset):
 class TorchAlbumentations:
 
     def __init__(self, transform):
-        """Wrapper around an Albumentations transform to handle type and name conversions."""
+        """Wraps an Albumentations image/bboxes transform to handle type conversions."""
         self.transform = transform
 
     def __call__(self, image: Tensor, boxes: Tensor) -> Tuple[Tensor, Tensor]:
@@ -210,7 +205,7 @@ class LitDetector(pl.LightningModule):
         self.log_images(images, detections, image_names)
 
     def log_images(self, images: List[Tensor], detections: List[DetectionsDict], image_names: List[str]) -> None:
-        """Log images with boxes and labels to TensorBoard"""
+        """Logs images annotated with boxes, labels and scores to TensorBoard."""
         tensorboard: SummaryWriter = self.logger.experiment  # type: ignore
         for name, img, dt in zip(image_names, images, detections, strict=True):
             labels = [f'{self.class_names[k - 1]}:{s:.0%}' for k, s in zip(dt['labels'], dt['scores'])]
@@ -237,7 +232,7 @@ class LitDetector(pl.LightningModule):
 
 class LitRetinaNet(LitDetector):
 
-    def __init__(self, num_classes: int, lr: float = 0.0001, class_names: Optional[List[str]] = None, **kwargs) -> None:
+    def __init__(self, num_classes: int, lr: float = 1e-4, class_names: Optional[List[str]] = None, **kwargs) -> None:
         super().__init__(num_classes, lr, class_names, **kwargs)
         self.model = retinanet_resnet50_fpn_v2(weights_backbone=ResNet50_Weights.DEFAULT, num_classes=num_classes)
 
@@ -246,6 +241,7 @@ class LitRetinaNet(LitDetector):
         images: List[Tensor],
         targets: Optional[List[TargetsDict]] = None
     ) -> RetinanetLossesDict | DetectionsDict:
+        """Returns the losses if training else returns the detections."""
         return self.model(images, targets)
 
     def configure_optimizers(self):
@@ -291,7 +287,7 @@ def train_retinanet(
             EarlyStopping(monitor='val_map', mode='max', patience=8, verbose=True),
             ModelCheckpoint(monitor='val_map', mode='max'),
         ],
-        max_epochs=5,
+        max_epochs=45,
         accelerator=accelerator,
         log_every_n_steps=10,
         val_check_interval=0.5
@@ -334,16 +330,15 @@ class LitFasterRCNN(LitDetector):
             - Phase 4: Train only the ROI heads.
             
         Model evaluation and testing
-            - Phases 1, 2 and 3: Log only the proposal or detection losses and the combined loss.
-            - Phase 4: Log the detection loss and the combined loss.
-              Also, after every epoch compute and log detailed mAP and mAR results.
-              Stop early if the the mAP doesn't improve.
+            - Phases 1, 2 and 3: Log the losses.
+            - Phase 4: Log the losses and detailed mAP and mAR results. Stop early if the the mAP doesn't improve.
 
         Args:
             num_classes (int): number of output classes of the model (including the background).
             lr (float, optional): learning rate to vbe used during training. Defaults to 1e-4.
             phase (Literal[1, 2, 3, 4], optional): The phase of the model. Should not be mutated. Defaults to 1.
-            class_names (Optional[List[str]], optional): Names of the classes (excluding the background).
+            class_names (Optional[List[str]], optional): 
+                Names of the classes (excluding the background).
                 If None then ['1', ..., '`num_classes`'] is used. Defaults to None.
         """
 
@@ -467,7 +462,7 @@ class LitFasterRCNN(LitDetector):
 
         match self.phase:
             case 1 | 3:
-                raise ValueError(f'No validation or test step step for phase {self.phase}')
+                raise ValueError(f'No validation or test step for phase {self.phase}')
             case 4:
                 assert len(batch) == 3
                 image_names, images, targets = batch
@@ -493,7 +488,7 @@ def cache_fasterrcnn(ckpt: str, loader: DataLoader, cache_dir: str | PathLike, a
     cache_dir = Path(cache_dir)
     cache_dir.mkdir(exist_ok=True, parents=True)
     device = torch.device(accelerator if accelerator != 'gpu' else 'cuda')
-    model.eval().to(device)
+    model = model.eval().to(device)
 
     for image_names, images, _ in tqdm(loader):
         images = [img.to(device) for img in images]
@@ -511,9 +506,7 @@ class Phase2Dataset(ObjectsDataset):
         mode: Literal['train', 'val', 'test'],
         proposals_dir: str | PathLike,
     ) -> None:
-        """ObjectsDataset with proposals.
-        No transform is used because proposals can lie outside the image bounds.
-        """
+        """ObjectsDataset with proposals. No transform is used because proposals can lie outside the image bounds."""
         super().__init__(root_dir, mode, transform=None)
         self.proposals_dir = Path(proposals_dir)
 
@@ -531,7 +524,7 @@ class Phase2Dataset(ObjectsDataset):
         return cls(dataset.root_dir, dataset.mode, proposals_dir)  # type: ignore
 
 
-def _train_fasterrcnn_phase(
+def train_fasterrcnn_phase(
     phase: Literal[1, 2, 3, 4],
     *,
     loader_train: DataLoader,
@@ -637,14 +630,14 @@ def train_fasterrcnn(
     num_classes = 1 + len(class_names)  # Including background
 
     # Train phase 1 and cache the proposals.
-    ckpt1 = _train_fasterrcnn_phase(
+    ckpt1 = train_fasterrcnn_phase(
         phase=1,
         output_dir=fasterrcnn_dir,
         loader_train=loader_train_p134,
         num_classes=num_classes,
         accelerator=accelerator,
         lr=1e-4,
-        max_epochs=1,
+        max_epochs=15,
         class_names=class_names,
     )
     proposals_dir = Path(ckpt1).parent.parent / 'proposals_cache'  # version_{i} / 'proposals_cache'
@@ -657,25 +650,25 @@ def train_fasterrcnn(
     )
 
     # Train phases 2, 3 and 4, and return the best phase 4 model checkpoint path.
-    ckpt2 = _train_fasterrcnn_phase(
+    ckpt2 = train_fasterrcnn_phase(
         phase=2,
         output_dir=fasterrcnn_dir,
         prev_ckpt=ckpt1,
         loader_train=loader_train_p2,
         accelerator=accelerator,
         lr=1e-4,
-        max_epochs=1,
+        max_epochs=15,
     )
-    ckpt3 = _train_fasterrcnn_phase(
+    ckpt3 = train_fasterrcnn_phase(
         phase=3,
         output_dir=fasterrcnn_dir,
         prev_ckpt=ckpt2,
         loader_train=loader_train_p134,
         accelerator=accelerator,
         lr=1e-4,
-        max_epochs=1,
+        max_epochs=15,
     )
-    ckpt4 = _train_fasterrcnn_phase(
+    ckpt4 = train_fasterrcnn_phase(
         phase=4,
         output_dir=fasterrcnn_dir,
         prev_ckpt=ckpt3,
@@ -684,20 +677,19 @@ def train_fasterrcnn(
         loader_test=loader_test_p134,
         accelerator=accelerator,
         lr=1e-4,
-        max_epochs=1,
+        max_epochs=30,
     )
     return ckpt4
 
 
 def main():
-    # Setup
     pl.seed_everything(42)
     data_dir = Path('data_dev')
     output_dir = Path('output_dev')
     accelerator = 'gpu' if torch.cuda.is_available() else 'cpu'
 
-    train_retinanet(data_dir, output_dir, batch_size=3, accelerator=accelerator, num_workers=2)
-    train_fasterrcnn(data_dir, output_dir, batch_size=3, accelerator=accelerator, num_workers=2)
+    train_retinanet(data_dir, output_dir, batch_size=4, accelerator=accelerator, num_workers=2)
+    train_fasterrcnn(data_dir, output_dir, batch_size=4, accelerator=accelerator, num_workers=2)
 
 
 if __name__ == '__main__':
