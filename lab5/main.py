@@ -240,7 +240,7 @@ class LitRetinaNet(LitDetector):
         self,
         images: List[Tensor],
         targets: Optional[List[TargetsDict]] = None
-    ) -> RetinanetLossesDict | DetectionsDict:
+    ) -> RetinanetLossesDict | List[DetectionsDict]:
         """Returns the losses if training else returns the detections."""
         return self.model(images, targets)
 
@@ -284,10 +284,10 @@ def train_retinanet(
     trainer = pl.Trainer(
         default_root_dir=str(retinanet_dir),
         callbacks=[
-            EarlyStopping(monitor='val_map', mode='max', patience=8, verbose=True),
+            EarlyStopping(monitor='val_map', mode='max', patience=30, verbose=True),
             ModelCheckpoint(monitor='val_map', mode='max'),
         ],
-        max_epochs=45,
+        max_epochs=110,
         accelerator=accelerator,
         log_every_n_steps=10,
         val_check_interval=0.5
@@ -537,7 +537,7 @@ def train_fasterrcnn_phase(
     max_epochs: int = 10,
     accelerator: str = 'cpu',
     log_every_n_steps: int = 10,
-    patience: int = 8,
+    patience: int = 30,
     class_names: Optional[List[str]] = None
 ) -> str:
     """Train a Faster RCNN phase.
@@ -637,7 +637,7 @@ def train_fasterrcnn(
         num_classes=num_classes,
         accelerator=accelerator,
         lr=1e-4,
-        max_epochs=15,
+        max_epochs=20,
         class_names=class_names,
     )
     proposals_dir = Path(ckpt1).parent.parent / 'proposals_cache'  # version_{i} / 'proposals_cache'
@@ -657,7 +657,7 @@ def train_fasterrcnn(
         loader_train=loader_train_p2,
         accelerator=accelerator,
         lr=1e-4,
-        max_epochs=15,
+        max_epochs=20,
     )
     ckpt3 = train_fasterrcnn_phase(
         phase=3,
@@ -666,7 +666,7 @@ def train_fasterrcnn(
         loader_train=loader_train_p134,
         accelerator=accelerator,
         lr=1e-4,
-        max_epochs=15,
+        max_epochs=20,
     )
     ckpt4 = train_fasterrcnn_phase(
         phase=4,
@@ -677,7 +677,7 @@ def train_fasterrcnn(
         loader_test=loader_test_p134,
         accelerator=accelerator,
         lr=1e-4,
-        max_epochs=30,
+        max_epochs=50,
     )
     return ckpt4
 
