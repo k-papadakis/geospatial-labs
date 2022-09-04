@@ -694,3 +694,12 @@ def main():
 
 if __name__ == '__main__':
     main()
+    
+
+# Images to plot  
+# >>> pl.seed_everything(42)
+# >>> dataset = ObjectsDataset('data', 'test')
+# >>> indices = np.random.randint(0, len(dataset), size=8)
+# >>> print(np.asarray(dataset.image_names)[indices])
+# ['00002894' '00002843' '00002884' '00002806' '00002898' '00002863'
+#  '00002852' '00002812']
