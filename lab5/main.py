@@ -684,8 +684,8 @@ def train_fasterrcnn(
 
 def main():
     pl.seed_everything(42)
-    data_dir = Path('data_dev')
-    output_dir = Path('output_dev')
+    data_dir = Path('data')
+    output_dir = Path('output')
     accelerator = 'gpu' if torch.cuda.is_available() else 'cpu'
 
     train_retinanet(data_dir, output_dir, batch_size=4, accelerator=accelerator, num_workers=2)
@@ -694,12 +694,42 @@ def main():
 
 if __name__ == '__main__':
     main()
-    
 
-# Images to plot  
-# >>> pl.seed_everything(42)
-# >>> dataset = ObjectsDataset('data', 'test')
-# >>> indices = np.random.randint(0, len(dataset), size=8)
-# >>> print(np.asarray(dataset.image_names)[indices])
-# ['00002894' '00002843' '00002884' '00002806' '00002898' '00002863'
-#  '00002852' '00002812']
+
+# def get_counts(mode):
+#     labels = torch.cat([target['labels'] for _, _, target in ObjectsDataset('data', mode)])
+#     return torch.unique(labels, return_counts=True)
+
+
+# def one_of_each(dataset, classes):
+#     """Get the first image containing a class, for each class"""
+#     batch = []
+#     classes = set(classes)
+#     for name, image, target in dataset:
+#         for label in target['labels'].tolist():
+#             if label in classes:
+#                 batch.append((name, image, target))
+#                 classes.remove(label)
+#     return batch
+
+
+# def visualize_one_of_each():
+#     from torchvision.utils import save_image
+#     dataset = ObjectsDataset('data', 'train')
+#     batch = one_of_each(dataset, range(1, 7))
+#     images_with_boxes = []
+#     for name, image, target in batch:
+#         image = TF.convert_image_dtype(image, torch.uint8)
+#         label = [ObjectsDataset.class_names[label_id - 1] for label_id in target['labels']]
+#         image = draw_bounding_boxes(image, target['boxes'], labels=label)
+#         image = TF.convert_image_dtype(image, torch.float32)
+#         images_with_boxes.append(image)
+#     save_image(images_with_boxes, 'one_of_each.png', nrow=3)
+
+
+# def images_to_plot():
+#     pl.seed_everything(42)
+#     dataset = ObjectsDataset('data', 'test')
+#     indices = np.random.randint(0, len(dataset), size=8)
+#     print(np.asarray(dataset.image_names)[indices])
+#     # ['00002894' '00002843' '00002884' '00002806' '00002898' '00002863' '00002852' '00002812']
