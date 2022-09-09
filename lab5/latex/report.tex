@@ -67,10 +67,10 @@ During training, we load images in batches of size 8, and augment them by sequen
     \item A random change in brightness and in contrast by a factor in \([-0.2, 0.2]\).
 \end{itemize}
 
-\subsection{One Stage Detector (RetinaNet)}
+\subsection{One-Stage Detector (RetinaNet)}
 We train a RetinaNet \cite{retinanet} with a setting of 110 epochs maximum and early stopping. More specifically, during training, every half epoch we evaluate the mean average precision (mAP) on the validation set. If the mAP didn’t improve for 30 consecutive half-epochs, we stop the training early. Early stopping did happen on epoch 103, meaning that the best weights were achieved on epoch 89. A learning rate of 0.0001 was used.
 
-\subsection{Single Stage Detector (Faster R-CNN)}
+\subsection{Two-Stage Detector (Faster R-CNN)}
 
 We train a Faster R-CNN using the 4-Step Alternating Training described in the original paper \cite{fasterrcnn}.
 
