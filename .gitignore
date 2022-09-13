@@ -1,14 +1,14 @@
-env
+.vscode
 *.tif
 *.pt
 *.ckpt
 data/
-.vscode
-__pycache__/
-dist/
-*egg-info/
-
-
+HyRANK_satellite/
+DOTA_zips/
+DOTA/
+split_ss_dota/
+mmrotate/
+work_dirs/
 
 ## Core latex/pdflatex auxiliary files:
 *.aux
