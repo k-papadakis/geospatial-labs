@@ -19,4 +19,14 @@ WORKDIR mmdetection
 RUN git checkout tags/v2.25.1 \
     && pip install -v -e . \
     && echo "data/" >> .gitignore && echo "work_dirs/" >> .gitignore
+
+# For matplotlib. https://stackoverflow.com/a/51881727/17386164
+ARG DEBIAN_FRONTEND=noninteractive
+ARG DEBCONF_NONINTERACTIVE_SEEN=true
+RUN echo 'tzdata tzdata/Areas select Europe' | debconf-set-selections \
+    && echo 'tzdata tzdata/Zones/Etc select Athens' | debconf-set-selections \
+    && apt-get update -y \
+    && apt-get install -y --no-install-recommends python3-tk \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/*
     

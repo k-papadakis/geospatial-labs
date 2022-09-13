@@ -28,13 +28,16 @@
 	"runArgs": [
 		"--gpus=all",
 		"--shm-size=8g",
-		"--volume=/home/konstantinos/projects/geospatial-labs/lab6/DOTA/:/workspace/mmrotate/data/DOTA/",
-		"--volume=/home/konstantinos/projects/geospatial-labs/lab6/mmr/split_ss_dota:/workspace/mmrotate/data/split_ss_dota",
-		"--volume=/home/konstantinos/projects/geospatial-labs/lab6/mmr/work_dirs/:/workspace/mmrotate/work_dirs/",
-		// "--volume=/home/konstantinos/projects/geospatial-labs/lab6/mmr/orcnn.py:/workspace/mmrotate/orcnn.py"
+		"-v", "/home/konstantinos/projects/geospatial-labs/lab6/DOTA/:/workspace/mmrotate/data/DOTA/",
+		"-v", "/home/konstantinos/projects/geospatial-labs/lab6/mmr/split_ss_dota:/workspace/mmrotate/data/split_ss_dota",
+		"-v", "/home/konstantinos/projects/geospatial-labs/lab6/mmr/work_dirs/:/workspace/mmrotate/work_dirs/",
+		// https://github.com/microsoft/wslg/blob/main/samples/container/Containers.md
+		"-v", "/tmp/.X11-unix:/tmp/.X11-unix"
 	],
 	"containerEnv": {
-		"MMR": "/workspace/mmrotate"
+		"MMR": "/workspace/mmrotate",
+		// "DISPLAY": "${localEnv:DISPLAY}"
+		"DISPLAY": ":0"
 	},
 	"customizations": {
 		"vscode": {

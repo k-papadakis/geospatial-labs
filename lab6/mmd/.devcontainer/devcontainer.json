@@ -28,11 +28,16 @@
 	"runArgs": [
 		"--gpus=all",
 		"--shm-size=8g",
-		"--volume=/home/konstantinos/projects/geospatial-labs/lab6/DOTA/:/workspace/mmdetection/data/DOTA/",
-		"--volume=/home/konstantinos/projects/geospatial-labs/lab6/mmd/work_dirs/:/workspace/mmdetection/work_dirs/"
+		"-v", "/home/konstantinos/projects/geospatial-labs/lab6/DOTA/:/workspace/mmdetection/data/DOTA/",
+		"-v", "/home/konstantinos/projects/geospatial-labs/lab6/mmr/split_ss_dota:/workspace/mmdetection/data/split_ss_dota",
+		"-v", "/home/konstantinos/projects/geospatial-labs/lab6/mmr/work_dirs/:/workspace/mmdetection/work_dirs/",
+		// https://github.com/microsoft/wslg/blob/main/samples/container/Containers.md
+		"-v", "/tmp/.X11-unix:/tmp/.X11-unix"
 	],
 	"containerEnv": {
-		"MMD": "/workspace/mmdetection"
+		"MMR": "/workspace/mmdetection",
+		// "DISPLAY": "${localEnv:DISPLAY}"
+		"DISPLAY": ":0"
 	},
 	"customizations": {
 		"vscode": {
