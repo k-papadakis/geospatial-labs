@@ -4,7 +4,7 @@
 
 MMRotate is based on MMDetection, which in turn is based on MMCV. MMCV is the the base of all [OpenMMLab projects](https://github.com/open-mmlab/).
 
-To install MMDetection or MMRotate, a carefull selection of package versions is required. See
+To install MMDetection or MMRotate, a careful selection of package versions is required. See
 [MMRotate installation](https://mmrotate.readthedocs.io/en/latest/install.html#installation),
 [MMRotate FAQ](https://mmrotate.readthedocs.io/en/latest/faq.html),
 [MMDetection installation](https://mmdetection.readthedocs.io/en/latest/get_started.html#installation),
@@ -12,7 +12,7 @@ To install MMDetection or MMRotate, a carefull selection of package versions is 
 [MMCV installation](https://mmcv.readthedocs.io/en/latest/get_started/installation.html),
 and [Pytorch Installation](https://pytorch.org/get-started/previous-versions/).
 
-An [MMRotate Dockerfile](../mmr/Dockerfile) and an [MMDetection Dockerfile](../mmd/Dockerfile) are included to setup working environments with the latest possible versions as of 13 September 2022 (the official dockerfiles don't work).
+An [MMRotate Dockerfile](./mmr/Dockerfile) and an [MMDetection Dockerfile](./mmd/Dockerfile) are included to setup working environments with the latest possible versions as of 13 September 2022 (the official dockerfiles don't work).
 
 After installation there should be an `mmrotate` or an `mmdetection` directory (git repo clone) inside the working directory. The most common usage is to `cd` inside this directory and do all the work inside it.
 
@@ -25,6 +25,7 @@ There is also good tutorials in the [MMdetection demo directory](https://github.
 Sadly, the documentation is lacking and looking up for answers on the internet usually won't return any relevant results. For this reason, it is often the case that one needs to browse the source code to understand the project's usage, even for basic things.
 
 ## MMRotate Basic Usage
+
 ### Setting up a DOTA-formatted dataset
 
 [Download DOTA v1.0](https://captain-whu.github.io/DOTA/) or transform the labels of different dataset in the [dota format](https://mmrotate.readthedocs.io/en/latest/tutorials/customize_dataset.html).
@@ -59,6 +60,7 @@ python tools/data/dota/split/img_split.py \
 ```
 
 The following structure will be created under `mmrotate/data`
+
 ```
 split_ss_dota/
 ├── test
