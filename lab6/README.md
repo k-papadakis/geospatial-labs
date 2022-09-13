@@ -28,7 +28,7 @@ Sadly, the documentation is lacking and looking up for answers on the internet u
 
 ### Setting up a DOTA-formatted dataset
 
-[Download DOTA v1.0](https://captain-whu.github.io/DOTA/) or transform the labels of different dataset in the [dota format](https://mmrotate.readthedocs.io/en/latest/tutorials/customize_dataset.html).
+[Download DOTA v1.0](https://captain-whu.github.io/DOTA/) or transform the labels of a different dataset into the [DOTA format](https://mmrotate.readthedocs.io/en/latest/tutorials/customize_dataset.html).
 
 Create a `data` directory inside `mmrotate` containing the following directory structure
 

@@ -10,7 +10,7 @@
 	"dockerFile": "../Dockerfile",
 
 	// Use 'forwardPorts' to make a list of ports inside the container available locally.
-	"forwardPorts": [6006],
+	"forwardPorts": [6006],  // default tensorboard port
 
 	// Uncomment the next line to run commands after the container is created - for example installing curl.
 	// "postCreateCommand": "apt-get update && apt-get install -y curl",
@@ -24,14 +24,18 @@
 	// Uncomment to connect as a non-root user if you've added one. See https://aka.ms/vscode-remote/containers/non-root.
 	// "remoteUser": "vscode"
 
-	"workspaceFolder": "/workspace/mmrotate/",
+	// "workspaceFolder": "/workspace/mmrotate/",
 	"runArgs": [
 		"--gpus=all",
+		"--shm-size=8g",
 		"--volume=/home/konstantinos/projects/geospatial-labs/lab6/DOTA/:/workspace/mmrotate/data/DOTA/",
 		"--volume=/home/konstantinos/projects/geospatial-labs/lab6/mmr/split_ss_dota:/workspace/mmrotate/data/split_ss_dota",
 		"--volume=/home/konstantinos/projects/geospatial-labs/lab6/mmr/work_dirs/:/workspace/mmrotate/work_dirs/",
-		"--volume=/home/konstantinos/projects/geospatial-labs/lab6/mmr/orcnn.py:/workspace/mmrotate/orcnn.py"
+		// "--volume=/home/konstantinos/projects/geospatial-labs/lab6/mmr/orcnn.py:/workspace/mmrotate/orcnn.py"
 	],
+	"containerEnv": {
+		"MMR": "/workspace/mmrotate"
+	},
 	"customizations": {
 		"vscode": {
 			"extensions": [
