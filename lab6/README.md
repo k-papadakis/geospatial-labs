@@ -10,9 +10,22 @@ To install MMDetection or MMRotate, a careful selection of package versions is r
 [MMDetection installation](https://mmdetection.readthedocs.io/en/latest/get_started.html#installation),
 [MMDetection FAQ](https://mmdetection.readthedocs.io/en/latest/faq.html),
 [MMCV installation](https://mmcv.readthedocs.io/en/latest/get_started/installation.html),
-and [Pytorch Installation](https://pytorch.org/get-started/previous-versions/).
+and [Pytorch Installation](https://pytorch.org/get-started/previous-versions/). An [MMRotate Dockerfile](./mmr/Dockerfile) and an [MMDetection Dockerfile](./mmd/Dockerfile) are included to setup working environments (the official dockerfiles don't work).
 
-An [MMRotate Dockerfile](./mmr/Dockerfile) and an [MMDetection Dockerfile](./mmd/Dockerfile) are included to setup working environments with the latest possible versions as of 13 September 2022 (the official dockerfiles don't work).
+To install with pip, the following works
+
+```shell
+pip install -U torch==1.11.0+cu113 torchvision==0.12.0+cu113 torchaudio==0.11.0 \
+    --extra-index-url https://download.pytorch.org/whl/cu113
+pip install mmcv-full==1.6.0 -f https://download.openmmlab.com/mmcv/dist/cu113/torch1.11.0/index.html
+pip install mmdet==2.25.1 mmengine==0.1.0 shapely==1.8.4 tensorboard==2.10.0 jupyter==1.0.0
+git clone https://github.com/open-mmlab/mmrotate.git
+cd mmrotate
+git checkout tags/v0.3.2
+pip install -v -e .
+
+```
+
 
 After installation there should be an `mmrotate` or an `mmdetection` directory (git repo clone) inside the working directory. The most common usage is to `cd` inside this directory and do all the work inside it.
 
