@@ -1,18 +1,18 @@
 .vscode
 *.tif
 *.pt
+*.pth
 *.ckpt
 data/
 HyRANK_satellite/
 DOTA_zips/
 DOTA/
 split_ss_dota/
-work_dirs/
 
 ## Core latex/pdflatex auxiliary files:
 *.aux
 *.lof
-*.log
+# *.log
 *.lot
 *.fls
 *.out
@@ -369,7 +369,7 @@ cover/
 *.pot
 
 # Django stuff:
-*.log
+# *.log
 local_settings.py
 db.sqlite3
 db.sqlite3-journal
