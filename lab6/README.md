@@ -150,3 +150,9 @@ python tools/test.py \
 ```
 
 which will create predictions for the original images (by assembling predictions on the image patches) inside `work_dirs/simple_config_preds/` in the format used for the [DOTA-v1.0 Evaluation Server](https://captain-whu.github.io/DOTA/evaluation.html).
+
+You can also use the custom made `predictor.py` file to run the model on images
+
+```shell
+python predictor.py --config ${CONFIG} --checkpoint ${CHECKPOINT} --imagedir {IMAGEDIR}
+```
