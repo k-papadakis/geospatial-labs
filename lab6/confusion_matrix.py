@@ -181,6 +181,9 @@ def alt_plot_confusion_matrix(
     )
     if title is not None:
         ax.set_title(title)
+    
+    ax.set_xlabel('Predicted Label')
+    ax.set_ylabel('True Label')
         
     fig.tight_layout()
     if save_dir is not None:

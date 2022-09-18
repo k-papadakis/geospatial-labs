@@ -1,0 +1,23 @@
+python tools/analysis_tools/confusion_matrix.py \
+    work_dirs/rretinanet/rretinanet.py \
+    rretinanet_results.pkl \
+    . \
+    --color-theme flare \
+    --tp-iou-thr 0.5 \
+    --score-thr 0.3 \
+    --title "Rotated RetinaNet - Normalized Confusion Matrix" \
+    --cfg-options \
+        data.test.img_prefix=./data/split_ss_dota/val/images/ \
+        data.test.ann_file=./data/split_ss_dota/val/annfiles/
+
+python tools/analysis_tools/confusion_matrix.py \
+    work_dirs/lab6config/lab6config.py \
+    orcnn_results.pkl \
+    . \
+    --color-theme flare \
+    --tp-iou-thr 0.7 \
+    --score-thr 0.3 \
+    --title "Oriented RCNN - Normalized Confusion Matrix" \
+    --cfg-options \
+        data.test.img_prefix=./data/split_ss_dota/val/images/ \
+        data.test.ann_file=./data/split_ss_dota/val/annfiles/

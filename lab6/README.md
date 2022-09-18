@@ -148,7 +148,7 @@ python tools/test.py \
 
 which will create predictions for the original images (by assembling predictions on the image patches and then performing non-max suppression) inside `work_dirs/simple_config_preds/` in the format used for the [DOTA-v1.0 Evaluation Server](https://captain-whu.github.io/DOTA/evaluation.html).
 
-You can also use the custom made `predictor.py` to do inference on the original images and show/save their annotated versions. The inference is done by cropping `1024 x 1024` patches with step `824` (i.e. overlap `200`), as well `crop=1024//2 x 1024//2, step=824//2`, and `crop=1024*2 x 1024*2, step=824*2`, running inference on those patches (patches are resized with bilinear interpolation before they are fed to the model) and then merging the results using non-max suppression with `iou_threshold = 0.1`.
+You can also use the custom made [predictor.py](./predictor.py) to do inference on the original images and show/save their annotated versions. The inference is performed by cropping  the original image into `1024 x 1024` patches with step `824` (i.e. overlap `200`), as well `crop=1024//2 x 1024//2, step=824//2`, and `crop=1024*2 x 1024*2, step=824*2`(patches are resized with bilinear interpolation before they are fed to the model), and then merging the results using non-max suppression with `iou_threshold = 0.1`.
 
 ```shell
 python predictor.py \
@@ -158,7 +158,8 @@ python predictor.py \
     --outdir predictions/myconfig
 ```
 
-To create a confusion matrix on the validation set you can run the provided modified `confusion_matrix.py` (Fixed non-existent argument in `nms_rotated` and non-working `--color-theme` option. Added plotting functionality with `seaborn`). For example
+To create a confusion matrix for the validation or training set, you can run the provided modified [confusion_matrix.py](confusion_matrix.py) (fixed in the [original version](https://github.com/open-mmlab/mmrotate/blob/main/tools/analysis_tools/confusion_matrix.py) an invalid argument in `nms_rotated`, a nonfunctional `--color-theme` option, added plotting functionality with `seaborn`, and normalization is now done by row instead by column).
+For example
 
 ```shell
 python tools/test.py \
