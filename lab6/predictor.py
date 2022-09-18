@@ -4,9 +4,9 @@ import argparse
 from mmdet.apis.inference import show_result_pyplot
 from mmcv.runner import load_checkpoint
 from mmrotate.apis.inference import inference_detector_by_patches
+from mmrotate.datasets.builder import build_dataset
 from mmrotate.models import build_detector
 from mmcv.utils.config import Config
-from mmrotate.datasets.dota import DOTADataset
 
 
 def visualize_predictions(config_path, checkpoint_path, imagedir, outdir=None):
@@ -16,10 +16,15 @@ def visualize_predictions(config_path, checkpoint_path, imagedir, outdir=None):
         outdir.mkdir(parents=True, exist_ok=False)
     
     config = Config.fromfile(config_path)
+    
+    dataset = build_dataset(config.data.train)
+    classes = dataset.CLASSES
+    palette = dataset.PALETTE
+    
     model = build_detector(config.model)
     load_checkpoint(model, checkpoint_path)
     model.cfg = config  # `inference_detector_by_patches` requires it for `model.cfg.data.test.pipeline`
-    model.CLASSES = DOTADataset.CLASSES
+    model.CLASSES = classes
     model.to(config.device)
     model.eval()
 
@@ -27,8 +32,8 @@ def visualize_predictions(config_path, checkpoint_path, imagedir, outdir=None):
         dets = inference_detector_by_patches(
             model=model, img=image_path, sizes=[1024], steps=[824], ratios=[0.5, 1.0, 2.0], merge_iou_thr=0.1
         )
-        outfile = outdir / f'{image_path.stem}_pred.{image_path.suffix}' if outdir is not None else None
-        show_result_pyplot(model, image_path, dets, score_thr=0.4, palette=DOTADataset.PALETTE, out_file=outfile)
+        outfile = outdir / f'{image_path.stem}_pred{image_path.suffix}' if outdir is not None else None
+        show_result_pyplot(model, image_path, dets, score_thr=0.4, palette=palette, out_file=outfile)
 
 
 def parse_args():
@@ -48,4 +53,3 @@ def main():
     
 if __name__ == '__main__':
     main()
-    
