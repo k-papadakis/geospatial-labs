@@ -1,0 +1,23 @@
+Largest Images:
+73076   DOTA/test/images/P2643.png  # Has big ships, small ships, many storage tanks
+67828   DOTA/test/images/P0112.png  # Has many pools, but it's too sparse and rid.
+64748   DOTA/test/images/P1870.png  # Airplanes, roundabouts, et al. Results are bad though.
+61468   DOTA/test/images/P1494.png
+58956   DOTA/test/images/P1157.png
+57704   DOTA/test/images/P1772.png
+53988   DOTA/test/images/P1004.png
+47684   DOTA/test/images/P1400.png
+47020   DOTA/test/images/P2762.png
+46696   DOTA/test/images/P0051.png
+
+P0006 Rotated RetinaNet performs badly
+P0134, P2051 have many pools
+P0148 has many stadiums
+P0185 has military jets
+P1280 is greyscale with planes
+P1290 is greyscale with ships
+P2338 has many bridges
+
+P0017 big airport. airplanes parked in twisted configuration. Contains road
+P0024 Big airport. large airplanes, small airplanes
+P0031 Pretty port.
