@@ -1,5 +1,11 @@
 # Oriented Object Detection with MMRotate
 
+![port-image](../logo.png)
+
+## Project's Presentation
+
+[**presentation.pdf**](presentation.pdf)
+
 ## Installation
 
 MMRotate is based on MMDetection, which in turn is based on MMCV. MMCV is the base of all [OpenMMLab projects](https://github.com/open-mmlab/).
