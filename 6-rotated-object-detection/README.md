@@ -164,7 +164,7 @@ python predictor.py \
     --outdir predictions/myconfig
 ```
 
-To create a confusion matrix for the validation or training set, you can run the provided modified [confusion_matrix.py](confusion_matrix.py) (fixed in the [original version](https://github.com/open-mmlab/mmrotate/blob/main/tools/analysis_tools/confusion_matrix.py) an invalid argument in `nms_rotated`, a nonfunctional `--color-theme` option, added plotting functionality with `seaborn`, and normalization is now done by row instead by column).
+To create a confusion matrix for the validation or training set, you can run the provided modified [confusion_matrix.py](confusion_matrix.py) (fixed in the [original version](https://github.com/open-mmlab/mmrotate/blob/main/tools/analysis_tools/confusion_matrix.py) an invalid argument in `nms_rotated`, a nonfunctional `--color-theme` option, and added plotting functionality with `seaborn`).
 For example
 
 ```shell
